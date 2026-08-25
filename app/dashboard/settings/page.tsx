@@ -133,6 +133,10 @@ export default function SettingsPage() {
   const [menuCategory, setMenuCategory] = useState("");
   const [menuIsQuickPick, setMenuIsQuickPick] = useState(false);
   const [wageDrafts, setWageDrafts] = useState<Record<string, string>>({});
+  const [specialWageDrafts, setSpecialWageDrafts] = useState<
+    Record<string, { amount: string; days: number[]; holiday: boolean }>
+  >({});
+  const [specialWageOpenIds, setSpecialWageOpenIds] = useState<Set<string>>(new Set());
   const [newStaffName, setNewStaffName] = useState("");
   const [newStaffWage, setNewStaffWage] = useState("");
   const [menuNameDrafts, setMenuNameDrafts] = useState<Record<string, string>>({});
@@ -253,6 +257,18 @@ export default function SettingsPage() {
     setWageDrafts(
       Object.fromEntries((staffData ?? []).map((s) => [s.id, s.hourly_wage != null ? String(s.hourly_wage) : ""]))
     );
+    setSpecialWageDrafts(
+      Object.fromEntries(
+        (staffData ?? []).map((s) => [
+          s.id,
+          {
+            amount: s.special_wage != null ? String(s.special_wage) : "",
+            days: s.special_wage_days ?? [],
+            holiday: s.special_wage_holiday ?? false,
+          },
+        ])
+      )
+    );
     setSalaryDrafts(
       Object.fromEntries(
         (staffData ?? []).map((s) => [
@@ -341,6 +357,30 @@ export default function SettingsPage() {
     const raw = wageDrafts[staffId] ?? "";
     const wage = raw.trim() === "" ? null : Number(raw);
     await supabase.from("staff").update({ hourly_wage: wage }).eq("id", staffId);
+    loadData();
+  }
+
+  function toggleSpecialWageOpen(id: string) {
+    setSpecialWageOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function saveSpecialWage(staffId: string) {
+    const draft = specialWageDrafts[staffId];
+    if (!draft) return;
+    const amount = draft.amount.trim() === "" ? null : Number(draft.amount);
+    await supabase
+      .from("staff")
+      .update({
+        special_wage: amount,
+        special_wage_days: draft.days.length > 0 ? draft.days : null,
+        special_wage_holiday: draft.holiday,
+      })
+      .eq("id", staffId);
     loadData();
   }
 
@@ -624,35 +664,114 @@ export default function SettingsPage() {
   const eligibleStaff = staff.filter((s) => s.commission_eligible);
   const ineligibleStaff = staff.filter((s) => !s.commission_eligible);
 
+  const WEEKDAY_LABELS = ["日", "月", "火", "水", "木", "金", "土"];
+
   function renderStaffRow(s: Staff) {
+    const specialOpen = specialWageOpenIds.has(s.id);
+    const specialDraft = specialWageDrafts[s.id] ?? { amount: "", days: [], holiday: false };
+    const specialDirty =
+      specialDraft.amount !== (s.special_wage != null ? String(s.special_wage) : "") ||
+      JSON.stringify([...specialDraft.days].sort()) !== JSON.stringify([...(s.special_wage_days ?? [])].sort()) ||
+      specialDraft.holiday !== (s.special_wage_holiday ?? false);
+
     return (
-      <div key={s.id} className="flex justify-between items-center px-3 py-2 text-sm gap-2">
-        <span className="text-gray-300 shrink-0">{s.name}</span>
-        <input
-          value={wageDrafts[s.id] ?? ""}
-          onChange={(e) => setWageDrafts((d) => ({ ...d, [s.id]: e.target.value }))}
-          placeholder="時給(任意)"
-          inputMode="numeric"
-          className="w-24 rounded-md bg-bg2 border border-line px-2 py-1 text-sm"
-        />
+      <div key={s.id} className="px-3 py-2 space-y-2">
+        <div className="flex justify-between items-center gap-2">
+          <span className="text-gray-300 shrink-0">{s.name}</span>
+          <input
+            value={wageDrafts[s.id] ?? ""}
+            onChange={(e) => setWageDrafts((d) => ({ ...d, [s.id]: e.target.value }))}
+            placeholder="時給(任意)"
+            inputMode="numeric"
+            className="w-24 rounded-md bg-bg2 border border-line px-2 py-1 text-sm"
+          />
+          <button
+            onClick={() => saveWage(s.id)}
+            disabled={(wageDrafts[s.id] ?? "") === (s.hourly_wage != null ? String(s.hourly_wage) : "")}
+            className="text-xs rounded-md border border-line px-2 py-1 text-gray-300 disabled:opacity-40 shrink-0"
+          >
+            保存
+          </button>
+          <button
+            onClick={() => toggleCommissionEligible(s)}
+            className={`text-xs rounded-md border px-2 py-1 shrink-0 ${
+              s.commission_eligible ? "border-gold text-gold bg-gold/10" : "border-line text-gray-500"
+            }`}
+          >
+            {s.commission_eligible ? "💰歩合対象" : "対象外"}
+          </button>
+          <button onClick={() => removeStaff(s.id)} className="text-rose text-xs shrink-0">
+            削除
+          </button>
+        </div>
+
         <button
-          onClick={() => saveWage(s.id)}
-          disabled={(wageDrafts[s.id] ?? "") === (s.hourly_wage != null ? String(s.hourly_wage) : "")}
-          className="text-xs rounded-md border border-line px-2 py-1 text-gray-300 disabled:opacity-40 shrink-0"
-        >
-          保存
-        </button>
-        <button
-          onClick={() => toggleCommissionEligible(s)}
-          className={`text-xs rounded-md border px-2 py-1 shrink-0 ${
-            s.commission_eligible ? "border-gold text-gold bg-gold/10" : "border-line text-gray-500"
+          onClick={() => toggleSpecialWageOpen(s.id)}
+          className={`text-xs rounded-md border px-2 py-1 ${
+            s.special_wage != null ? "border-gold text-gold bg-gold/10" : "border-line text-gray-500"
           }`}
         >
-          {s.commission_eligible ? "💰歩合対象" : "対象外"}
+          特別時給{s.special_wage != null ? `：¥${s.special_wage.toLocaleString()}` : "を設定"}
+          {specialOpen ? " ▲" : " ▼"}
         </button>
-        <button onClick={() => removeStaff(s.id)} className="text-rose text-xs shrink-0">
-          削除
-        </button>
+
+        {specialOpen && (
+          <div className="rounded-md border border-line bg-elevated p-2.5 space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                value={specialDraft.amount}
+                onChange={(e) =>
+                  setSpecialWageDrafts((d) => ({ ...d, [s.id]: { ...specialDraft, amount: e.target.value } }))
+                }
+                placeholder="特別時給(任意)"
+                inputMode="numeric"
+                className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-sm"
+              />
+              <span className="text-xs text-gray-500">対象の曜日・祝日のみ通常の時給の代わりに適用</span>
+            </div>
+            <div className="flex gap-1.5">
+              {WEEKDAY_LABELS.map((label, dow) => {
+                const active = specialDraft.days.includes(dow);
+                return (
+                  <button
+                    key={dow}
+                    onClick={() =>
+                      setSpecialWageDrafts((d) => ({
+                        ...d,
+                        [s.id]: {
+                          ...specialDraft,
+                          days: active ? specialDraft.days.filter((x) => x !== dow) : [...specialDraft.days, dow],
+                        },
+                      }))
+                    }
+                    className={`w-8 h-8 rounded-md border text-xs ${
+                      active ? "border-gold text-gold bg-gold/10" : "border-line text-gray-500"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <label className="flex items-center gap-2 text-xs text-gray-400">
+              <input
+                type="checkbox"
+                checked={specialDraft.holiday}
+                onChange={(e) =>
+                  setSpecialWageDrafts((d) => ({ ...d, [s.id]: { ...specialDraft, holiday: e.target.checked } }))
+                }
+              />
+              祝日も対象にする
+            </label>
+            <button
+              onClick={() => saveSpecialWage(s.id)}
+              disabled={!specialDirty}
+              className="text-xs rounded-md border border-line px-3 py-1.5 text-gray-300 disabled:opacity-40"
+            >
+              保存
+            </button>
+          </div>
+        )}
       </div>
     );
   }

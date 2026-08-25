@@ -5,7 +5,16 @@ import { createClient } from "@/lib/supabaseClient";
 import { useStore } from "@/lib/StoreContext";
 import { useBusinessDate } from "@/lib/BusinessDateContext";
 import { DateBar } from "@/lib/DateBar";
-import { Expense, EXPENSE_CATEGORIES, EXPENSE_CATEGORY_ICONS, EXPENSE_CATEGORY_COLORS, Staff, Attendance, attHours } from "@/lib/types";
+import {
+  Expense,
+  EXPENSE_CATEGORIES,
+  EXPENSE_CATEGORY_ICONS,
+  EXPENSE_CATEGORY_COLORS,
+  Staff,
+  Attendance,
+  attHours,
+  effectiveHourlyWage,
+} from "@/lib/types";
 
 function SectionHeader({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -139,7 +148,7 @@ export default function ExpensesPage() {
       business_date: businessDate,
       clock_in: clockIn.toISOString(),
       clock_out: clockOut.toISOString(),
-      wage_snapshot: s.hourly_wage,
+      wage_snapshot: effectiveHourlyWage(s, businessDate),
     });
     setAttStaffId("");
     setAttStart("");

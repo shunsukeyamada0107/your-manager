@@ -1,3 +1,5 @@
+import holidayJp from "@holiday-jp/holiday_jp";
+
 export type Staff = {
   id: string;
   store_id: string;
@@ -7,6 +9,9 @@ export type Staff = {
   commission_eligible: boolean;
   base_salary: number | null;
   special_allowance: number | null;
+  special_wage: number | null; // 特別時給（対象曜日・祝日に該当する日はhourly_wageの代わりにこちらを使う）
+  special_wage_days: number[] | null; // 対象曜日（0=日〜6=土）。null/空なら曜日条件なし
+  special_wage_holiday: boolean; // 祝日も対象にするか
 };
 
 export type MenuItem = {
@@ -219,6 +224,20 @@ export function businessDateFor(d: Date, cutoffHour: number = DEFAULT_BUSINESS_D
   return `${y}-${m}-${day}`;
 }
 
+// その営業日に適用すべき時給を返す（対象曜日・祝日に該当すればspecial_wage、それ以外はhourly_wage）
+export function effectiveHourlyWage(
+  staff: Pick<Staff, "hourly_wage" | "special_wage" | "special_wage_days" | "special_wage_holiday">,
+  businessDate: string
+): number | null {
+  if (staff.special_wage != null) {
+    const d = new Date(`${businessDate}T00:00:00`);
+    const dayMatch = staff.special_wage_days?.includes(d.getDay()) ?? false;
+    const holidayMatch = staff.special_wage_holiday && holidayJp.isHoliday(d);
+    if (dayMatch || holidayMatch) return staff.special_wage;
+  }
+  return staff.hourly_wage;
+}
+
 // 出勤からの経過時間（時間単位）
 export function attHours(a: Pick<Attendance, "clock_in" | "clock_out">, nowMs = Date.now()) {
   const inMs = new Date(a.clock_in).getTime();
@@ -429,7 +448,8 @@ export function daySummary(
     commissionTotal,
     labor,
     expense,
-    profit: total - labor - expense,
+    // 粗利は人件費を差し引かない（売上－経費）。人件費は別建てのlaborで確認する
+    profit: total - expense,
     cash,
     card,
     unsettled,

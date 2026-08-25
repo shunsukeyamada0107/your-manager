@@ -1187,7 +1187,7 @@ export default function ReportPage() {
       </div>
 
       <div className="rounded-xl border border-line border-l-4 border-l-gold bg-elevated p-3 flex justify-between items-center text-sm font-mono">
-        <span className="text-gray-300 font-bold">粗利（売上－経費－人件費）</span>
+        <span className="text-gray-300 font-bold">粗利（売上－経費）</span>
         <span className="text-right text-gold font-bold text-base">{yen(summary.profit)}</span>
       </div>
 
@@ -1318,7 +1318,7 @@ export default function ReportPage() {
         </div>
 
         <div className="rounded-xl border border-line border-l-4 border-l-[#6FB3E0] bg-elevated p-3 flex justify-between items-center text-sm font-mono">
-          <span className="text-gray-300 font-bold">粗利合計（売上－経費－人件費）</span>
+          <span className="text-gray-300 font-bold">粗利合計（売上－経費）</span>
           <span className="text-right text-[#6FB3E0] font-bold text-base">{yen(monthTotal.profit)}</span>
         </div>
 
@@ -1379,8 +1379,6 @@ export default function ReportPage() {
                     <span className="col-span-2 text-right text-xs text-gray-500 -mt-0.5">
                       （消費税 {yen(selectedChartRow.tax)}）
                     </span>
-                    <span className="text-gray-300 font-bold mt-2">粗利（売上－経費－人件費）</span>
-                    <span className="text-right text-[#6FB3E0] font-bold mt-2">{yen(selectedChartRow.profit)}</span>
                   </div>
                 ) : (
                   <div className="text-xs text-gray-500 text-center">この日の記録はありません</div>

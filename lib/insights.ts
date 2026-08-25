@@ -32,7 +32,7 @@ export function generateInsights(
   if (profitMargin < 0.5) {
     insights.push({
       level: "warning",
-      text: `粗利率が${pct(profitMargin)}と低めです。原価や人件費のバランスを見直す余地があるかもしれません`,
+      text: `粗利率が${pct(profitMargin)}と低めです。原価や経費のバランスを見直す余地があるかもしれません`,
     });
   } else if (profitMargin >= 0.7) {
     insights.push({ level: "positive", text: `粗利率${pct(profitMargin)}と好調です` });

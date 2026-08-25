@@ -11,6 +11,7 @@ import {
   businessDateFor,
   attHours,
   dayLaborCost,
+  effectiveHourlyWage,
   hourlyLaborBreakdown,
   staffCommissionBreakdown,
   daySummary,
@@ -183,6 +184,33 @@ describe("attHours / dayLaborCost / hourlyLaborBreakdown", () => {
   });
 });
 
+describe("effectiveHourlyWage", () => {
+  const base = { hourly_wage: 1200, special_wage: 1600, special_wage_days: [6], special_wage_holiday: false };
+
+  it("uses the special wage on a matching weekday", () => {
+    expect(effectiveHourlyWage(base, "2024-01-06")).toBe(1600); // 土曜日
+  });
+
+  it("uses the normal wage on a non-matching weekday", () => {
+    expect(effectiveHourlyWage(base, "2024-01-10")).toBe(1200); // 水曜日
+  });
+
+  it("uses the special wage on a national holiday when holiday flag is set, even off the configured weekday", () => {
+    const staff = { ...base, special_wage_days: [], special_wage_holiday: true };
+    expect(effectiveHourlyWage(staff, "2024-11-03")).toBe(1600); // 文化の日（日曜以外の祝日）
+  });
+
+  it("ignores holidays when the holiday flag is off", () => {
+    const staff = { ...base, special_wage_days: [], special_wage_holiday: false };
+    expect(effectiveHourlyWage(staff, "2024-11-03")).toBe(1200);
+  });
+
+  it("falls back to the normal wage when no special wage is configured", () => {
+    const staff = { ...base, special_wage: null };
+    expect(effectiveHourlyWage(staff, "2024-01-06")).toBe(1200);
+  });
+});
+
 describe("staffCommissionBreakdown — simple scheme", () => {
   it("gives 100% of the tab's actual total to the assigned staff, times the rate", () => {
     const t = tab({
@@ -347,7 +375,7 @@ describe("daySummary reconciliation", () => {
     const summary = daySummary(tabs, attendance, expenses, staffNameOf, 0.1, 0.2, "simple");
 
     expect(summary.cash + summary.card + summary.unsettled).toBeCloseTo(summary.total, 5);
-    expect(summary.profit).toBeCloseTo(summary.total - summary.labor - summary.expense, 8);
+    expect(summary.profit).toBeCloseTo(summary.total - summary.expense, 8);
     expect(summary.labor).toBeCloseTo(summary.laborHourly + summary.commissionTotal, 8);
   });
 

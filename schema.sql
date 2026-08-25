@@ -80,6 +80,9 @@ create table staff (
   commission_eligible boolean not null default true, -- false = 歩合の対象外（伝票を担当してもその分は歩合計算に含めない）
   base_salary         numeric,           -- 基本給（月給制の場合）。設定タブの「オーナー専用」ページの参照情報のみで、歩合・時給の自動計算には含めない
   special_allowance   numeric,           -- 特別手当。同上、参照情報のみ
+  special_wage        numeric,           -- 特別時給。対象曜日・祝日に該当する日はhourly_wageの代わりにこちらを出退勤登録時に採用する
+  special_wage_days   smallint[],        -- 特別時給の対象曜日（0=日〜6=土）。null/空なら曜日条件なし
+  special_wage_holiday boolean not null default false, -- 特別時給を祝日にも適用するか
   created_at          timestamptz not null default now()
 );
 
