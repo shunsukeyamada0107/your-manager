@@ -209,6 +209,7 @@ function POSPageInner() {
   const [createdAtDraft, setCreatedAtDraft] = useState("");
   const [closedAtDraft, setClosedAtDraft] = useState("");
   const [timesError, setTimesError] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
   const [manualName, setManualName] = useState("");
   const [manualPrice, setManualPrice] = useState("");
   const [manualDiscount, setManualDiscount] = useState("");
@@ -762,10 +763,15 @@ function POSPageInner() {
     if (!activeTab || !pendingSettleMethod) return;
     const method = pendingSettleMethod;
     setPendingSettleMethod(null);
-    await supabase
+    setOperationError(null);
+    const { error } = await supabase
       .from("tabs")
       .update({ payment_method: method, closed_at: new Date().toISOString() })
       .eq("id", activeTab.id);
+    if (error) {
+      setOperationError("会計を確定できませんでした。通信状態を確認して、もう一度お試しください。");
+      return;
+    }
     loadData();
     setShowReceipt(true);
   }
@@ -782,17 +788,13 @@ function POSPageInner() {
   async function deleteTab() {
     if (!activeTab || !storeId) return;
     if (!confirm(`「${activeTab.name}」の伝票を削除しますか？（元に戻せません）`)) return;
-    // 会計前後にかかわらず、削除時点の点数・金額を記録しておく（不正な伝票消しの見える化のため）
-    await supabase.from("tab_logs").insert({
-      store_id: storeId,
-      action: "deleted",
-      tab_name: activeTab.name,
-      business_date: activeTab.business_date,
-      guest_count: activeTab.guest_count,
-      item_count: activeTab.tab_items.reduce((a, i) => a + i.qty, 0),
-      total_amount: tabTotal(activeTab.tab_items, taxRate, activeTab.discount_percent, activeTab.discount_amount),
-    });
-    await supabase.from("tabs").delete().eq("id", activeTab.id);
+    setOperationError(null);
+    // DB関数内で監査ログ作成と伝票削除を同一トランザクションとして実行する。
+    const { error } = await supabase.rpc("delete_tab_with_log", { p_tab_id: activeTab.id });
+    if (error) {
+      setOperationError("伝票を削除できませんでした。データは変更されていません。");
+      return;
+    }
     setActiveTabId(null);
     loadData();
   }
@@ -1029,6 +1031,11 @@ function POSPageInner() {
   return (
     <div className="space-y-4">
       <DateBar />
+      {operationError && (
+        <div role="alert" className="rounded-lg border border-rose/40 bg-rose/10 px-3 py-2 text-sm text-rose">
+          {operationError}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-2.5">
         <div className="rounded-xl border border-line bg-elevated px-3.5 py-3">

@@ -182,6 +182,57 @@ create table expenses (
   created_at     timestamptz not null default now()
 );
 
+-- 監査ログと伝票削除を同一トランザクションで行う。
+-- security invokerのまま実行し、呼び出しユーザーのRLS権限を必ず適用する。
+create or replace function delete_tab_with_log(p_tab_id uuid)
+returns void
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  target_tab tabs%rowtype;
+  item_count_value integer;
+  subtotal_value numeric;
+  pre_discount_total numeric;
+  discount_value numeric;
+  total_value numeric;
+begin
+  select * into target_tab from tabs where id = p_tab_id for update;
+  if not found then
+    raise exception '伝票が見つからないか、削除権限がありません。';
+  end if;
+
+  select coalesce(sum(qty), 0), coalesce(sum(price * qty), 0)
+  into item_count_value, subtotal_value
+  from tab_items
+  where tab_id = p_tab_id;
+
+  pre_discount_total := subtotal_value + round(subtotal_value * (select tax_rate from stores where id = target_tab.store_id));
+  discount_value := least(
+    pre_discount_total,
+    case
+      when coalesce(target_tab.discount_percent, 0) <> 0
+        then round(pre_discount_total * target_tab.discount_percent / 100)
+      else 0
+    end + coalesce(target_tab.discount_amount, 0)
+  );
+  total_value := ceil((pre_discount_total - discount_value) / 100) * 100;
+
+  insert into tab_logs (
+    store_id, action, tab_name, business_date, guest_count, item_count, total_amount
+  ) values (
+    target_tab.store_id, 'deleted', target_tab.name, target_tab.business_date,
+    target_tab.guest_count, item_count_value, total_value
+  );
+
+  delete from tabs where id = p_tab_id;
+end;
+$$;
+
+revoke all on function delete_tab_with_log(uuid) from public;
+grant execute on function delete_tab_with_log(uuid) to authenticated;
+
 -- ============================================================
 -- Row Level Security（店舗間のデータ漏洩を防ぐ最重要設定）
 -- 「自分がstore_membersに登録されている店舗のデータしか見えない」ようにする
@@ -269,8 +320,13 @@ create policy "org members can view their organization's tab items"
     tab_id in (select id from tabs where store_id in (select my_org_store_ids()))
   );
 
-create policy "store members can access their tab logs"
-  on tab_logs for all using (store_id in (select my_store_ids()));
+create policy "store members can view their tab logs"
+  on tab_logs for select to authenticated
+  using (store_id in (select my_store_ids()));
+
+create policy "store members can create their tab logs"
+  on tab_logs for insert to authenticated
+  with check (store_id in (select my_store_ids()));
 
 create policy "store members can access their attendance"
   on attendance for all using (store_id in (select my_store_ids()));
@@ -288,17 +344,39 @@ create policy "org members can view their organization's expenses"
 -- Storage（レシート画像の保存先）
 -- receiptsバケットを作成し、ログイン済みユーザーのアップロードを許可する
 -- ============================================================
-insert into storage.buckets (id, name, public)
-values ('receipts', 'receipts', true)
-on conflict (id) do nothing;
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'receipts',
+  'receipts',
+  false,
+  5242880,
+  array['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']
+)
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
 
 create policy "authenticated users can upload receipts"
   on storage.objects for insert to authenticated
-  with check (bucket_id = 'receipts');
+  with check (
+    bucket_id = 'receipts'
+    and (storage.foldername(name))[1] in (select id::text from my_store_ids() as id)
+  );
+
+create policy "store members can view their receipts"
+  on storage.objects for select to authenticated
+  using (
+    bucket_id = 'receipts'
+    and (storage.foldername(name))[1] in (select id::text from my_store_ids() as id)
+  );
 
 create policy "authenticated users can delete their receipts"
   on storage.objects for delete to authenticated
-  using (bucket_id = 'receipts');
+  using (
+    bucket_id = 'receipts'
+    and (storage.foldername(name))[1] in (select id::text from my_store_ids() as id)
+  );
 
 -- ============================================================
 -- インデックス（店舗数・データ量が増えても検索を高速に保つため）

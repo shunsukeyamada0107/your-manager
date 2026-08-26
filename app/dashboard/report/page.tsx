@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabaseClient";
+import { signExpenseReceipts } from "@/lib/receiptStorage";
 import { useStore } from "@/lib/StoreContext";
 import { useBusinessDate } from "@/lib/BusinessDateContext";
 import { DateBar } from "@/lib/DateBar";
@@ -418,7 +419,7 @@ export default function ReportPage() {
       .select("*")
       .eq("store_id", storeId)
       .eq("business_date", businessDate);
-    setExpenses(expData ?? []);
+    setExpenses(await signExpenseReceipts(supabase, expData ?? []));
 
     const [
       { data: monthTabs },
@@ -507,7 +508,7 @@ export default function ReportPage() {
     setMonthRows(rows);
     setMonthTabsRaw((monthTabs as TabWithItems[]) ?? []);
     setMonthAttRaw((monthAtt as Attendance[]) ?? []);
-    setMonthExpRaw((monthExp as Expense[]) ?? []);
+    setMonthExpRaw(await signExpenseReceipts(supabase, (monthExp as Expense[]) ?? []));
     setPrevMonthSummary(
       daySummary(
         (prevTabs as TabWithItems[]) ?? [],

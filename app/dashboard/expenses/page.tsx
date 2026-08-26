@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabaseClient";
 import { useStore } from "@/lib/StoreContext";
 import { useBusinessDate } from "@/lib/BusinessDateContext";
 import { DateBar } from "@/lib/DateBar";
+import { receiptPathFromValue, signExpenseReceipts, signReceiptValue, validateReceiptFile } from "@/lib/receiptStorage";
 import {
   Expense,
   EXPENSE_CATEGORIES,
@@ -63,8 +64,10 @@ export default function ExpensesPage() {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [receiptUrl, setReceiptUrl] = useState<string | null>(null);
+  const [receiptPreviewUrl, setReceiptPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [hourlyStaff, setHourlyStaff] = useState<Staff[]>([]);
@@ -76,13 +79,17 @@ export default function ExpensesPage() {
 
   const loadData = useCallback(async () => {
     if (!storeId) return;
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("expenses")
       .select("*")
       .eq("store_id", storeId)
       .eq("business_date", businessDate)
       .order("created_at", { ascending: false });
-    setExpenses(data ?? []);
+    if (error) {
+      setOperationError("経費データを取得できませんでした。通信状態を確認してください。");
+    } else {
+      setExpenses(await signExpenseReceipts(supabase, data ?? []));
+    }
 
     const { data: staffData } = await supabase
       .from("staff")
@@ -163,15 +170,33 @@ export default function ExpensesPage() {
 
   async function handleReceiptFile(file: File) {
     if (!storeId) return;
+    const validationError = validateReceiptFile(file);
+    if (validationError) {
+      setOperationError(validationError);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    setOperationError(null);
     setUploading(true);
     try {
-      const ext = file.name.split(".").pop() || "jpg";
+      const extByType: Record<string, string> = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/heic": "heic",
+        "image/heif": "heif",
+      };
+      const ext = extByType[file.type];
       const path = `${storeId}/${businessDate}/${Date.now()}.${ext}`;
-      const { error } = await supabase.storage.from("receipts").upload(path, file);
-      if (!error) {
-        const { data } = supabase.storage.from("receipts").getPublicUrl(path);
-        setReceiptUrl(data.publicUrl);
-      }
+      const { error } = await supabase.storage.from("receipts").upload(path, file, {
+        contentType: file.type,
+        upsert: false,
+      });
+      if (error) throw error;
+      setReceiptUrl(path);
+      setReceiptPreviewUrl(await signReceiptValue(supabase, path));
+    } catch {
+      setOperationError("レシート画像をアップロードできませんでした。");
     } finally {
       setUploading(false);
     }
@@ -179,7 +204,8 @@ export default function ExpensesPage() {
 
   async function addExpense() {
     if (!storeId || !name.trim() || !amount.trim()) return;
-    await supabase.from("expenses").insert({
+    setOperationError(null);
+    const { error } = await supabase.from("expenses").insert({
       store_id: storeId,
       business_date: businessDate,
       category,
@@ -187,14 +213,39 @@ export default function ExpensesPage() {
       amount: Number(amount),
       receipt_url: receiptUrl,
     });
+    if (error) {
+      setOperationError("経費を保存できませんでした。入力内容と通信状態を確認してください。");
+      return;
+    }
     setName("");
     setAmount("");
     setReceiptUrl(null);
+    setReceiptPreviewUrl(null);
     loadData();
   }
 
+  async function removePendingReceipt() {
+    const path = receiptPathFromValue(receiptUrl);
+    setReceiptUrl(null);
+    setReceiptPreviewUrl(null);
+    if (!path) return;
+    const { error } = await supabase.storage.from("receipts").remove([path]);
+    if (error) setOperationError("添付を外しましたが、アップロード済み画像の削除に失敗しました。");
+  }
+
   async function deleteExpense(id: string) {
-    await supabase.from("expenses").delete().eq("id", id);
+    const expense = expenses.find((item) => item.id === id);
+    setOperationError(null);
+    const { error } = await supabase.from("expenses").delete().eq("id", id);
+    if (error) {
+      setOperationError("経費を削除できませんでした。");
+      return;
+    }
+    const receiptPath = receiptPathFromValue(expense?.receipt_url ?? null);
+    if (receiptPath) {
+      const { error: storageError } = await supabase.storage.from("receipts").remove([receiptPath]);
+      if (storageError) setOperationError("経費は削除しましたが、レシート画像の削除に失敗しました。");
+    }
     loadData();
   }
 
@@ -207,6 +258,11 @@ export default function ExpensesPage() {
   return (
     <div className="space-y-4">
       <DateBar />
+      {operationError && (
+        <div role="alert" className="rounded-lg border border-rose/40 bg-rose/10 px-3 py-2 text-sm text-rose">
+          {operationError}
+        </div>
+      )}
       <div className="rounded-xl border border-line bg-elevated p-4">
         <SectionHeader icon={<PlusSectionIcon />}>経費を追加</SectionHeader>
         <div className="space-y-2">
@@ -249,9 +305,11 @@ export default function ExpensesPage() {
           />
           {receiptUrl ? (
             <div className="flex items-center gap-2">
-              <img src={receiptUrl} alt="レシート" className="w-14 h-14 object-cover rounded-md border border-line" />
+              {receiptPreviewUrl && (
+                <img src={receiptPreviewUrl} alt="レシート" className="w-14 h-14 object-cover rounded-md border border-line" />
+              )}
               <span className="text-xs text-gray-400 flex-1">レシートを添付しました</span>
-              <button onClick={() => setReceiptUrl(null)} className="text-rose text-xs shrink-0">
+              <button onClick={removePendingReceipt} className="text-rose text-xs shrink-0">
                 削除
               </button>
             </div>
