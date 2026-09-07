@@ -752,7 +752,7 @@ export default function SettingsPage() {
           </button>
         </div>
 
-        {s.commission_eligible && (
+        {s.commission_eligible && s.commission_basis !== "total_sales" && (
           <div className="flex items-center gap-2">
             <label className="text-xs text-gray-500 shrink-0">歩合の基準</label>
             <select
@@ -781,7 +781,7 @@ export default function SettingsPage() {
               className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
             >
               <option value="own_tabs">自分の担当伝票のみ</option>
-              <option value="total_sales">店舗全体の売上</option>
+              <option value="total_sales">歩合対象の伝票全体</option>
             </select>
             {s.commission_basis === "total_sales" && (
               <>
@@ -792,7 +792,9 @@ export default function SettingsPage() {
                   inputMode="numeric"
                   className="w-20 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
                 />
-                <span className="text-xs text-gray-500">%（店舗全体の売上が対象）</span>
+                <span className="text-xs text-gray-500">
+                  %（他の歩合対象スタッフが担当した伝票の合計が対象。歩合対象外のスタッフの分・未設定の伝票分は含まない）
+                </span>
                 <button
                   onClick={() => saveTotalSalesRate(s.id)}
                   disabled={

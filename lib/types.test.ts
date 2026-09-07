@@ -341,31 +341,36 @@ describe("staffCommissionBreakdown — taxBasis='pre_tax'", () => {
 });
 
 describe("staffCommissionBreakdown — totalSalesStaff (commission_basis='total_sales')", () => {
-  it("pays the total-sales staff on the store's whole sales, replacing their own per-tab share", () => {
-    const t1 = tab({ staff_id: "a", tab_items: [item({ price: 3000, qty: 1 })] }); // 税込3300
+  it("pays the total-sales staff on the sum of commission-eligible tabs, not the store's raw sales", () => {
+    const t1 = tab({ staff_id: "a", tab_items: [item({ price: 3000, qty: 1 })] }); // 税込3300、歩合対象
     const t2 = tab({
-      staff_id: "c", // cは総売上歩合の対象。担当していても按分には参加しない
+      staff_id: "c", // cは総売上歩合の対象。担当していても、その伝票自体は歩合対象の合計には含まれない
       tab_items: [item({ price: 1000, qty: 1 })], // 税込1100
     });
+    const t3 = tab({ staff_id: "b", tab_items: [item({ price: 2000, qty: 1 })] }); // 税込2200、bは歩合対象外
     const result = staffCommissionBreakdown(
-      [t1, t2],
+      [t1, t2, t3],
       staffNameOf,
       0.1,
       0.2,
       "simple",
       200,
-      () => true,
+      (id) => id !== "b",
       () => "with_tax",
       [{ staffId: "c", rate: 0.05 }]
     );
     const a = result.find((r) => r.staffId === "a")!;
     const c = result.find((r) => r.staffId === "c")!;
+    const b = result.find((r) => r.staffId === "b");
     // aは通常どおり自分の担当分（3300）だけが対象
     expect(a.salesWithTax).toBeCloseTo(3300, 5);
     expect(a.commission).toBeCloseTo(660, 5);
-    // cは自分が担当したt2の按分ではなく、店舗全体(t1+t2=4400)に専用の歩合率(5%)を掛けた額になる
-    expect(c.salesWithTax).toBeCloseTo(4400, 5);
-    expect(c.commission).toBeCloseTo(220, 5);
+    // bは歩合対象外なので歩合が発生しない
+    expect(b).toBeUndefined();
+    // cは自分が担当したt2（歩合対象の合計には含まれない）でも、bの担当分（歩合対象外）でもなく、
+    // 歩合対象スタッフ(a)が担当したt1の3300だけに専用の歩合率(5%)を掛けた額になる
+    expect(c.salesWithTax).toBeCloseTo(3300, 5);
+    expect(c.commission).toBeCloseTo(165, 5);
   });
 
   it("still shows up with zero commission when there are no closed tabs", () => {

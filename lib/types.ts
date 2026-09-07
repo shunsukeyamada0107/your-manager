@@ -325,8 +325,10 @@ export function totalSalesCommissionStaff(staffList: Staff[]): Array<{ staffId: 
 //   is_cast_drink品目の数量×drinkBackAmount（ドリンクバック）を足す。
 //
 // totalSalesStaff: commission_basis='total_sales'のスタッフ（totalSalesCommissionStaff()で抽出）。
-//   このスタッフは、自分の担当伝票の按分歩合の代わりに、店舗全体の売上（担当有無を問わず全ての会計済み伝票の合計）に
-//   専用の歩合率を掛けた額をそのまま歩合にする（両方が重複計算されないよう、按分の対象からは除外する）。
+//   このスタッフは、自分の担当伝票の按分歩合の代わりに「歩合対象の伝票（歩合対象スタッフが担当した分の按分売上）」の
+//   合計に専用の歩合率を掛けた額をそのまま歩合にする（両方が重複計算されないよう、按分の対象からは除外する）。
+//   店舗の生の売上そのものではないため、歩合対象外スタッフの担当分・未設定の伝票分は含まない。
+//   なお按分売上は各担当者ごとのtaxBasisFor()（税込/税抜）をそのまま使った額の合計なので、taxBasisFor(このスタッフのid)自体は使わない。
 export function staffCommissionBreakdown(
   tabs: TabWithItems[],
   staffNameOf: (staffId: string | null) => string,
@@ -367,14 +369,6 @@ export function staffCommissionBreakdown(
     const keepRatio = preDiscountTotal > 0 ? adjustedTotal / preDiscountTotal : 1;
     const preTaxAdjustedTotal = sub * keepRatio;
 
-    // 店舗全体の売上を対象とする歩合（担当かどうかは問わず、この伝票の実額をまるごと積算する）
-    totalSalesStaff.forEach(({ staffId, rate }) => {
-      const basis = taxBasisFor(staffId) === "pre_tax" ? preTaxAdjustedTotal : roundedTotal;
-      map[staffId].salesExTax += sub;
-      map[staffId].salesWithTax += basis;
-      map[staffId].commission += basis * rate;
-    });
-
     // 品目ごとの個別指定があればそれを優先、無ければ伝票の担当スタッフ（未設定・歩合対象外・総売上歩合の人は集計しない）
     const byStaff: Record<string, number> = {};
     const byStaffDrink: Record<string, number> = {};
@@ -389,6 +383,10 @@ export function staffCommissionBreakdown(
         byStaffDrinkQty[effectiveStaffId] = (byStaffDrinkQty[effectiveStaffId] ?? 0) + i.qty;
       }
     });
+
+    // 総売上歩合スタッフの基準は、店舗の生の売上ではなく「歩合対象の伝票（歩合対象スタッフが担当した分）」の合計にする
+    let tabCommissionableRawSub = 0;
+    let tabCommissionableSalesWithTax = 0;
 
     Object.entries(byStaff).forEach(([key, rawSub]) => {
       const shareRatio = rawSub / sub;
@@ -415,6 +413,8 @@ export function staffCommissionBreakdown(
       }
       map[key].salesExTax += rawSub;
       map[key].salesWithTax += salesWithTax;
+      tabCommissionableRawSub += rawSub;
+      tabCommissionableSalesWithTax += salesWithTax;
 
       if (scheme === "drink_back") {
         const drinkQty = byStaffDrinkQty[key] ?? 0;
@@ -429,6 +429,13 @@ export function staffCommissionBreakdown(
       } else {
         map[key].commission += salesWithTax * commissionRate;
       }
+    });
+
+    // 総売上歩合スタッフ：店舗の生の売上ではなく、この伝票のうち歩合対象スタッフが担当した分の合計に自分の歩合率を掛ける
+    totalSalesStaff.forEach(({ staffId, rate }) => {
+      map[staffId].salesExTax += tabCommissionableRawSub;
+      map[staffId].salesWithTax += tabCommissionableSalesWithTax;
+      map[staffId].commission += tabCommissionableSalesWithTax * rate;
     });
   });
   return Object.values(map).sort((a, b) => b.commission - a.commission);
