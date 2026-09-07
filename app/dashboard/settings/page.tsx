@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabaseClient";
 import { useStore, NameInputMode } from "@/lib/StoreContext";
+import { OwnerPinGate } from "@/lib/OwnerPinGate";
 import {
   Attendance,
   MenuItem,
@@ -124,6 +125,9 @@ export default function SettingsPage() {
     nameInputMode,
     payCycle,
     commissionTaxBasis,
+    reportPinRequired,
+    settingsPinRequired,
+    loading: storeLoading,
     reload,
   } = useStore();
   const [menu, setMenu] = useState<MenuItem[]>([]);
@@ -421,6 +425,18 @@ export default function SettingsPage() {
     const rate = raw.trim() === "" ? null : Number(raw) / 100;
     await supabase.from("staff").update({ total_sales_commission_rate: rate }).eq("id", staffId);
     loadData();
+  }
+
+  async function toggleReportPinRequired(value: boolean) {
+    if (!storeId) return;
+    await supabase.from("stores").update({ report_pin_required: value }).eq("id", storeId);
+    reload();
+  }
+
+  async function toggleSettingsPinRequired(value: boolean) {
+    if (!storeId) return;
+    await supabase.from("stores").update({ settings_pin_required: value }).eq("id", storeId);
+    reload();
   }
 
   async function openOwnerLock() {
@@ -864,6 +880,12 @@ export default function SettingsPage() {
   }
 
   return (
+    <OwnerPinGate
+      storeId={storeId}
+      enabled={settingsPinRequired}
+      storeLoading={storeLoading}
+      onUnlock={() => setOwnerUnlocked(true)}
+    >
     <div className="space-y-6">
       <Link
         href="/dashboard/settings/guide"
@@ -1590,6 +1612,25 @@ export default function SettingsPage() {
             >
               暗証番号を変更する
             </button>
+            <div className="rounded-xl border border-line p-3 space-y-2">
+              <div className="text-xs text-gray-500">画面ロック（この暗証番号を知らないスタッフには見せない）</div>
+              <label className="flex items-center justify-between gap-2 text-sm text-gray-300">
+                集計ページに鍵をかける
+                <input
+                  type="checkbox"
+                  checked={reportPinRequired}
+                  onChange={(e) => toggleReportPinRequired(e.target.checked)}
+                />
+              </label>
+              <label className="flex items-center justify-between gap-2 text-sm text-gray-300">
+                設定ページに鍵をかける
+                <input
+                  type="checkbox"
+                  checked={settingsPinRequired}
+                  onChange={(e) => toggleSettingsPinRequired(e.target.checked)}
+                />
+              </label>
+            </div>
           </div>
         )}
       </div>
@@ -1862,5 +1903,6 @@ export default function SettingsPage() {
         </>
       )}
     </div>
+    </OwnerPinGate>
   );
 }

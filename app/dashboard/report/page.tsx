@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabaseClient";
 import { signExpenseReceipts } from "@/lib/receiptStorage";
 import { useStore } from "@/lib/StoreContext";
+import { OwnerPinGate } from "@/lib/OwnerPinGate";
 import { useBusinessDate } from "@/lib/BusinessDateContext";
 import { DateBar } from "@/lib/DateBar";
 import {
@@ -368,6 +369,8 @@ export default function ReportPage() {
     drinkBackAmount,
     commissionTaxBasis,
     showInsights,
+    reportPinRequired,
+    loading: storeLoading,
   } = useStore();
   const { date: businessDate, isToday } = useBusinessDate();
   const { start: monthStart, end: monthEnd, label: monthLabel } = monthRange(new Date(`${businessDate}T12:00:00`));
@@ -1014,6 +1017,7 @@ export default function ReportPage() {
   }
 
   return (
+    <OwnerPinGate storeId={storeId} enabled={reportPinRequired} storeLoading={storeLoading}>
     <div className="space-y-6">
       <DateBar />
 
@@ -1661,5 +1665,6 @@ export default function ReportPage() {
         </div>
       )}
     </div>
+    </OwnerPinGate>
   );
 }
