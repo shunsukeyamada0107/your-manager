@@ -18,6 +18,7 @@ import {
   UNCATEGORIZED_LABEL,
   hourlyLaborBreakdown,
   staffCommissionBreakdown,
+  commissionTaxBasisResolver,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
 import { StoreTheme } from "@/lib/theme";
@@ -394,6 +395,11 @@ export default function SettingsPage() {
     loadData();
   }
 
+  async function saveCommissionTaxBasisOverride(s: Staff, value: CommissionTaxBasis | null) {
+    await supabase.from("staff").update({ commission_tax_basis_override: value }).eq("id", s.id);
+    loadData();
+  }
+
   async function openOwnerLock() {
     setPinError("");
     setPinInput("");
@@ -432,7 +438,7 @@ export default function SettingsPage() {
       commissionScheme,
       drinkBackAmount,
       isEligible,
-      commissionTaxBasis
+      commissionTaxBasisResolver(staff, commissionTaxBasis)
     );
     setMonthCommission(breakdown);
     setMonthCommissionLoaded(true);
@@ -507,7 +513,7 @@ export default function SettingsPage() {
       commissionScheme,
       drinkBackAmount,
       isEligible,
-      commissionTaxBasis
+      commissionTaxBasisResolver(staff, commissionTaxBasis)
     ).find((c) => c.staffId === payslipStaffId);
     const commission = myCommission?.commission ?? 0;
     const personalSales = myCommission?.salesWithTax ?? 0;
@@ -704,6 +710,26 @@ export default function SettingsPage() {
             削除
           </button>
         </div>
+
+        {s.commission_eligible && (
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500 shrink-0">歩合の基準</label>
+            <select
+              value={s.commission_tax_basis_override ?? ""}
+              onChange={(e) =>
+                saveCommissionTaxBasisOverride(
+                  s,
+                  e.target.value === "" ? null : (e.target.value as CommissionTaxBasis)
+                )
+              }
+              className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+            >
+              <option value="">店舗設定に従う（{commissionTaxBasis === "pre_tax" ? "税抜小計" : "税込金額"}）</option>
+              <option value="with_tax">消費税込みの金額</option>
+              <option value="pre_tax">消費税抜きの小計</option>
+            </select>
+          </div>
+        )}
 
         <button
           onClick={() => toggleSpecialWageOpen(s.id)}

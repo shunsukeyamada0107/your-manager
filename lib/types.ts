@@ -12,6 +12,7 @@ export type Staff = {
   special_wage: number | null; // 特別時給（対象曜日・祝日に該当する日はhourly_wageの代わりにこちらを使う）
   special_wage_days: number[] | null; // 対象曜日（0=日〜6=土）。null/空なら曜日条件なし
   special_wage_holiday: boolean; // 祝日も対象にするか
+  commission_tax_basis_override: CommissionTaxBasis | null; // 歩合の計算基準を店舗設定と別に指定する場合の上書き値。null=店舗設定に従う
 };
 
 export type MenuItem = {
@@ -283,6 +284,14 @@ export type StaffCommission = {
 export type CommissionTaxBasis = "with_tax" | "pre_tax";
 export const DEFAULT_COMMISSION_TAX_BASIS: CommissionTaxBasis = "with_tax";
 
+// スタッフごとの上書き設定（commission_tax_basis_override）があればそれを、無ければ店舗設定を使う
+export function commissionTaxBasisResolver(
+  staffList: Staff[],
+  storeDefault: CommissionTaxBasis
+): (staffId: string) => CommissionTaxBasis {
+  return (staffId: string) => staffList.find((s) => s.id === staffId)?.commission_tax_basis_override ?? storeDefault;
+}
+
 // 歩合給: 会計済み（closed_atがある）伝票の売上を、品目ごとの担当（tab_items.staff_id で個別指定があればそれ、
 // 無ければ伝票の担当 tabs.staff_id）で按分する。
 // 例: 伝票の担当はAさんだが、シャンパンだけBさんに個別指定した場合、シャンパン分だけBさんの歩合になる。
@@ -309,7 +318,7 @@ export function staffCommissionBreakdown(
   scheme: CommissionScheme = "simple",
   drinkBackAmount: number = DEFAULT_DRINK_BACK_AMOUNT,
   isCommissionEligible: (staffId: string) => boolean = () => true,
-  taxBasis: CommissionTaxBasis = DEFAULT_COMMISSION_TAX_BASIS
+  taxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS
 ): StaffCommission[] {
   const map: Record<string, StaffCommission> = {};
   tabs.forEach((t) => {
@@ -342,6 +351,8 @@ export function staffCommissionBreakdown(
 
     Object.entries(byStaff).forEach(([key, rawSub]) => {
       const shareRatio = rawSub / sub;
+      // 歩合の計算基準はスタッフごとに上書き可能（未設定なら店舗設定 taxBasisFor() の既定値を使う）
+      const taxBasis = taxBasisFor(key);
       // 税抜モード：割引後の税抜小計をそのまま按分（切り上げの概念自体がないので分岐なし）。
       // 税込モード：1人で丸ごと担当なら実際の会計額を、複数人で分け合うなら切り上げ前の金額を按分し、
       //   分け合う場合は伝票のデフォルト担当にだけ切り上げ差額を上乗せする（伝票そのものの責任者のため）
@@ -407,7 +418,7 @@ export function daySummary(
   commissionScheme: CommissionScheme = "simple",
   drinkBackAmount: number = DEFAULT_DRINK_BACK_AMOUNT,
   isCommissionEligible: (staffId: string) => boolean = () => true,
-  commissionTaxBasis: CommissionTaxBasis = DEFAULT_COMMISSION_TAX_BASIS
+  commissionTaxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS
 ): DaySummary {
   const subtotal = tabs.reduce((a, t) => a + tabSubtotal(t.tab_items), 0);
   const tax = tabs.reduce((a, t) => a + tabTax(t.tab_items, taxRate), 0);
@@ -420,7 +431,7 @@ export function daySummary(
     commissionScheme,
     drinkBackAmount,
     isCommissionEligible,
-    commissionTaxBasis
+    commissionTaxBasisFor
   ).reduce(
     (a, c) => a + c.commission,
     0

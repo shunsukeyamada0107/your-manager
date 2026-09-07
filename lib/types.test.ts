@@ -301,7 +301,7 @@ describe("staffCommissionBreakdown — taxBasis='pre_tax'", () => {
       staff_id: "a",
       tab_items: [item({ price: 1000, qty: 3 })], // 小計3000 -> 税込3300
     });
-    const result = staffCommissionBreakdown([t], staffNameOf, 0.1, 0.2, "simple", 200, () => true, "pre_tax");
+    const result = staffCommissionBreakdown([t], staffNameOf, 0.1, 0.2, "simple", 200, () => true, () => "pre_tax");
     expect(result[0].salesWithTax).toBeCloseTo(3000, 5);
     expect(result[0].commission).toBeCloseTo(600, 5); // 3000 * 0.2
   });
@@ -312,9 +312,31 @@ describe("staffCommissionBreakdown — taxBasis='pre_tax'", () => {
       discount_amount: 500,
       tab_items: [item({ price: 2400, qty: 1 })], // 小計2400 -> 税込2640 -> 割引後2140
     });
-    const result = staffCommissionBreakdown([t], staffNameOf, 0.1, 0.2, "simple", 200, () => true, "pre_tax");
+    const result = staffCommissionBreakdown([t], staffNameOf, 0.1, 0.2, "simple", 200, () => true, () => "pre_tax");
     const keepRatio = 2140 / 2640;
     expect(result[0].salesWithTax).toBeCloseTo(2400 * keepRatio, 5);
+  });
+
+  it("lets taxBasisFor() vary the basis per staff on the same tab", () => {
+    const t = tab({
+      staff_id: "a",
+      tab_items: [item({ price: 2000, qty: 1 }), item({ price: 2000, qty: 1, staff_id: "b" })],
+      // 小計4000 -> 税込4400（丸ごと按分なら切り上げなし）
+    });
+    const result = staffCommissionBreakdown(
+      [t],
+      staffNameOf,
+      0.1,
+      0.2,
+      "simple",
+      200,
+      () => true,
+      (staffId) => (staffId === "b" ? "pre_tax" : "with_tax")
+    );
+    const a = result.find((r) => r.staffId === "a")!;
+    const b = result.find((r) => r.staffId === "b")!;
+    expect(a.salesWithTax).toBeCloseTo(2200, 5); // with_tax: 4400の半分
+    expect(b.salesWithTax).toBeCloseTo(2000, 5); // pre_tax: 4000（税抜小計）の半分
   });
 });
 

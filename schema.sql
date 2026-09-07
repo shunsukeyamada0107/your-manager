@@ -83,6 +83,7 @@ create table staff (
   special_wage        numeric,           -- 特別時給。対象曜日・祝日に該当する日はhourly_wageの代わりにこちらを出退勤登録時に採用する
   special_wage_days   smallint[],        -- 特別時給の対象曜日（0=日〜6=土）。null/空なら曜日条件なし
   special_wage_holiday boolean not null default false, -- 特別時給を祝日にも適用するか
+  commission_tax_basis_override text check (commission_tax_basis_override in ('with_tax','pre_tax')), -- 歩合の計算に使う金額の基準を店舗設定と別に指定する場合の上書き値。null=店舗設定(stores.commission_tax_basis)に従う
   created_at          timestamptz not null default now()
 );
 
