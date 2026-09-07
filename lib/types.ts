@@ -15,6 +15,7 @@ export type Staff = {
   commission_tax_basis_override: CommissionTaxBasis | null; // 歩合の計算基準を店舗設定と別に指定する場合の上書き値。null=店舗設定に従う
   commission_basis: CommissionBasis; // 歩合の対象範囲。own_tabs=自分が担当した伝票の売上（通常）、total_sales=店舗全体の売上
   total_sales_commission_rate: number | null; // commission_basis='total_sales'の場合に使う、その人専用の歩合率
+  commission_rate_override: number | null; // commission_basis='own_tabs'の人の歩合率を店舗設定と別に指定する場合の上書き値。null=店舗設定のcommission_rateに従う
 };
 
 export type MenuItem = {
@@ -294,6 +295,12 @@ export function commissionTaxBasisResolver(
   return (staffId: string) => staffList.find((s) => s.id === staffId)?.commission_tax_basis_override ?? storeDefault;
 }
 
+// スタッフごとの上書き設定（commission_rate_override）があればそれを、無ければ店舗設定の歩合率を使う。
+// own_tabsの歩合計算（simpleの一律%、drink_backの売上バック部分）にそのまま使う
+export function commissionRateResolver(staffList: Staff[], storeDefault: number): (staffId: string) => number {
+  return (staffId: string) => staffList.find((s) => s.id === staffId)?.commission_rate_override ?? storeDefault;
+}
+
 // 歩合の対象範囲。own_tabs=自分が担当した伝票の売上（通常）、total_sales=店舗全体の売上（この場合、通常の按分歩合の代わりにこちらだけを使う）
 export type CommissionBasis = "own_tabs" | "total_sales";
 export const DEFAULT_COMMISSION_BASIS: CommissionBasis = "own_tabs";
@@ -329,6 +336,9 @@ export function totalSalesCommissionStaff(staffList: Staff[]): Array<{ staffId: 
 //   合計に専用の歩合率を掛けた額をそのまま歩合にする（両方が重複計算されないよう、按分の対象からは除外する）。
 //   店舗の生の売上そのものではないため、歩合対象外スタッフの担当分・未設定の伝票分は含まない。
 //   なお按分売上は各担当者ごとのtaxBasisFor()（税込/税抜）をそのまま使った額の合計なので、taxBasisFor(このスタッフのid)自体は使わない。
+//
+// commissionRateFor: own_tabsの人（simpleの一律%、drink_backの売上バック部分）の歩合率を、店舗設定の
+//   commissionRateと別に個人ごとに指定したい場合のコールバック（未設定ならcommissionRateをそのまま使う）。
 export function staffCommissionBreakdown(
   tabs: TabWithItems[],
   staffNameOf: (staffId: string | null) => string,
@@ -338,7 +348,8 @@ export function staffCommissionBreakdown(
   drinkBackAmount: number = DEFAULT_DRINK_BACK_AMOUNT,
   isCommissionEligible: (staffId: string) => boolean = () => true,
   taxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
-  totalSalesStaff: Array<{ staffId: string; rate: number }> = []
+  totalSalesStaff: Array<{ staffId: string; rate: number }> = [],
+  commissionRateFor: (staffId: string) => number = () => commissionRate
 ): StaffCommission[] {
   const map: Record<string, StaffCommission> = {};
   const totalSalesStaffIds = new Set(totalSalesStaff.map((s) => s.staffId));
@@ -416,18 +427,20 @@ export function staffCommissionBreakdown(
       tabCommissionableRawSub += rawSub;
       tabCommissionableSalesWithTax += salesWithTax;
 
+      // 歩合率もスタッフごとに上書き可能（未設定なら店舗設定 commissionRateFor() の既定値を使う）
+      const rate = commissionRateFor(key);
       if (scheme === "drink_back") {
         const drinkQty = byStaffDrinkQty[key] ?? 0;
         const drinkShareRatio = (byStaffDrink[key] ?? 0) / sub;
         const drinkSalesWithTax = basis * drinkShareRatio;
-        const salesBack = Math.max(0, salesWithTax - drinkSalesWithTax) * commissionRate;
+        const salesBack = Math.max(0, salesWithTax - drinkSalesWithTax) * rate;
         const drinkBack = drinkQty * drinkBackAmount;
         map[key].drinkCount += drinkQty;
         map[key].salesBack += salesBack;
         map[key].drinkBack += drinkBack;
         map[key].commission += salesBack + drinkBack;
       } else {
-        map[key].commission += salesWithTax * commissionRate;
+        map[key].commission += salesWithTax * rate;
       }
     });
 
@@ -467,7 +480,8 @@ export function daySummary(
   drinkBackAmount: number = DEFAULT_DRINK_BACK_AMOUNT,
   isCommissionEligible: (staffId: string) => boolean = () => true,
   commissionTaxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
-  totalSalesStaff: Array<{ staffId: string; rate: number }> = []
+  totalSalesStaff: Array<{ staffId: string; rate: number }> = [],
+  commissionRateFor: (staffId: string) => number = () => commissionRate
 ): DaySummary {
   const subtotal = tabs.reduce((a, t) => a + tabSubtotal(t.tab_items), 0);
   const tax = tabs.reduce((a, t) => a + tabTax(t.tab_items, taxRate), 0);
@@ -481,7 +495,8 @@ export function daySummary(
     drinkBackAmount,
     isCommissionEligible,
     commissionTaxBasisFor,
-    totalSalesStaff
+    totalSalesStaff,
+    commissionRateFor
   ).reduce(
     (a, c) => a + c.commission,
     0

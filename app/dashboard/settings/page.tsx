@@ -21,6 +21,7 @@ import {
   staffCommissionBreakdown,
   commissionTaxBasisResolver,
   totalSalesCommissionStaff,
+  commissionRateResolver,
   CommissionBasis,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
@@ -141,6 +142,7 @@ export default function SettingsPage() {
   const [menuIsQuickPick, setMenuIsQuickPick] = useState(false);
   const [wageDrafts, setWageDrafts] = useState<Record<string, string>>({});
   const [totalSalesRateDrafts, setTotalSalesRateDrafts] = useState<Record<string, string>>({});
+  const [commissionRateOverrideDrafts, setCommissionRateOverrideDrafts] = useState<Record<string, string>>({});
   const [specialWageDrafts, setSpecialWageDrafts] = useState<
     Record<string, { amount: string; days: number[]; holiday: boolean }>
   >({});
@@ -270,6 +272,14 @@ export default function SettingsPage() {
         (staffData ?? []).map((s) => [
           s.id,
           s.total_sales_commission_rate != null ? String(Math.round(s.total_sales_commission_rate * 100)) : "",
+        ])
+      )
+    );
+    setCommissionRateOverrideDrafts(
+      Object.fromEntries(
+        (staffData ?? []).map((s) => [
+          s.id,
+          s.commission_rate_override != null ? String(Math.round(s.commission_rate_override * 100)) : "",
         ])
       )
     );
@@ -427,6 +437,13 @@ export default function SettingsPage() {
     loadData();
   }
 
+  async function saveCommissionRateOverride(staffId: string) {
+    const raw = commissionRateOverrideDrafts[staffId] ?? "";
+    const rate = raw.trim() === "" ? null : Number(raw) / 100;
+    await supabase.from("staff").update({ commission_rate_override: rate }).eq("id", staffId);
+    loadData();
+  }
+
   async function toggleReportPinRequired(value: boolean) {
     if (!storeId) return;
     await supabase.from("stores").update({ report_pin_required: value }).eq("id", storeId);
@@ -478,7 +495,8 @@ export default function SettingsPage() {
       drinkBackAmount,
       isEligible,
       commissionTaxBasisResolver(staff, commissionTaxBasis),
-      totalSalesCommissionStaff(staff)
+      totalSalesCommissionStaff(staff),
+      commissionRateResolver(staff, commissionRate)
     );
     setMonthCommission(breakdown);
     setMonthCommissionLoaded(true);
@@ -554,7 +572,8 @@ export default function SettingsPage() {
       drinkBackAmount,
       isEligible,
       commissionTaxBasisResolver(staff, commissionTaxBasis),
-      totalSalesCommissionStaff(staff)
+      totalSalesCommissionStaff(staff),
+      commissionRateResolver(staff, commissionRate)
     ).find((c) => c.staffId === payslipStaffId);
     const commission = myCommission?.commission ?? 0;
     const personalSales = myCommission?.salesWithTax ?? 0;
@@ -800,6 +819,28 @@ export default function SettingsPage() {
                   disabled={
                     (totalSalesRateDrafts[s.id] ?? "") ===
                     (s.total_sales_commission_rate != null ? String(Math.round(s.total_sales_commission_rate * 100)) : "")
+                  }
+                  className="text-xs rounded-md border border-line px-2 py-1 text-gray-300 disabled:opacity-40"
+                >
+                  保存
+                </button>
+              </>
+            )}
+            {s.commission_basis === "own_tabs" && (
+              <>
+                <input
+                  value={commissionRateOverrideDrafts[s.id] ?? ""}
+                  onChange={(e) => setCommissionRateOverrideDrafts((d) => ({ ...d, [s.id]: e.target.value }))}
+                  placeholder={`歩合率(%) 例:${Math.round(commissionRate * 100)}`}
+                  inputMode="numeric"
+                  className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                />
+                <span className="text-xs text-gray-500">%（空欄なら店舗設定の歩合率{Math.round(commissionRate * 100)}%を使用）</span>
+                <button
+                  onClick={() => saveCommissionRateOverride(s.id)}
+                  disabled={
+                    (commissionRateOverrideDrafts[s.id] ?? "") ===
+                    (s.commission_rate_override != null ? String(Math.round(s.commission_rate_override * 100)) : "")
                   }
                   className="text-xs rounded-md border border-line px-2 py-1 text-gray-300 disabled:opacity-40"
                 >

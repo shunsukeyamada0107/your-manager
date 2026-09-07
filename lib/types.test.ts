@@ -389,6 +389,29 @@ describe("staffCommissionBreakdown — totalSalesStaff (commission_basis='total_
   });
 });
 
+describe("staffCommissionBreakdown — commissionRateFor (per-staff commission_rate_override)", () => {
+  it("lets an own_tabs staff use their own rate instead of the store's commissionRate", () => {
+    const t1 = tab({ staff_id: "a", tab_items: [item({ price: 3000, qty: 1 })] }); // 税込3300
+    const t2 = tab({ staff_id: "b", tab_items: [item({ price: 3000, qty: 1 })] }); // 税込3300
+    const result = staffCommissionBreakdown(
+      [t1, t2],
+      staffNameOf,
+      0.1,
+      0.1, // 店舗の歩合率は10%
+      "simple",
+      200,
+      () => true,
+      () => "with_tax",
+      [],
+      (staffId) => (staffId === "a" ? 0.42 : 0.1)
+    );
+    const a = result.find((r) => r.staffId === "a")!;
+    const b = result.find((r) => r.staffId === "b")!;
+    expect(a.commission).toBeCloseTo(3300 * 0.42, 5);
+    expect(b.commission).toBeCloseTo(3300 * 0.1, 5);
+  });
+});
+
 describe("staffCommissionBreakdown — drink_back scheme (matches the spec example)", () => {
   it("30,000円の売上・5,000円のドリンク・5杯で 売上バック2,500円+ドリンクバック1,000円=3,500円になる", () => {
     const t = tab({

@@ -88,6 +88,7 @@ create table staff (
   commission_tax_basis_override text check (commission_tax_basis_override in ('with_tax','pre_tax')), -- 歩合の計算に使う金額の基準を店舗設定と別に指定する場合の上書き値。null=店舗設定(stores.commission_tax_basis)に従う
   commission_basis    text not null default 'own_tabs' check (commission_basis in ('own_tabs','total_sales')), -- 歩合の対象範囲。own_tabs=自分が担当した伝票の売上（通常）、total_sales=店舗全体の売上（この場合、通常の按分歩合の代わりにtotal_sales_commission_rateだけを使う）
   total_sales_commission_rate numeric, -- commission_basis='total_sales'の場合に使う、その人専用の歩合率（0.05=5%）。nullなら歩合0扱い
+  commission_rate_override numeric, -- commission_basis='own_tabs'の人の歩合率を店舗設定(stores.commission_rate)と別に指定する場合の上書き値。null=店舗設定に従う
   created_at          timestamptz not null default now()
 );
 
