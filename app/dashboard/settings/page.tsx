@@ -19,6 +19,8 @@ import {
   hourlyLaborBreakdown,
   staffCommissionBreakdown,
   commissionTaxBasisResolver,
+  totalSalesCommissionStaff,
+  CommissionBasis,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
 import { StoreTheme } from "@/lib/theme";
@@ -134,6 +136,7 @@ export default function SettingsPage() {
   const [menuCategory, setMenuCategory] = useState("");
   const [menuIsQuickPick, setMenuIsQuickPick] = useState(false);
   const [wageDrafts, setWageDrafts] = useState<Record<string, string>>({});
+  const [totalSalesRateDrafts, setTotalSalesRateDrafts] = useState<Record<string, string>>({});
   const [specialWageDrafts, setSpecialWageDrafts] = useState<
     Record<string, { amount: string; days: number[]; holiday: boolean }>
   >({});
@@ -257,6 +260,14 @@ export default function SettingsPage() {
     setStaff(staffData ?? []);
     setWageDrafts(
       Object.fromEntries((staffData ?? []).map((s) => [s.id, s.hourly_wage != null ? String(s.hourly_wage) : ""]))
+    );
+    setTotalSalesRateDrafts(
+      Object.fromEntries(
+        (staffData ?? []).map((s) => [
+          s.id,
+          s.total_sales_commission_rate != null ? String(Math.round(s.total_sales_commission_rate * 100)) : "",
+        ])
+      )
     );
     setSpecialWageDrafts(
       Object.fromEntries(
@@ -400,6 +411,18 @@ export default function SettingsPage() {
     loadData();
   }
 
+  async function saveCommissionBasis(s: Staff, value: CommissionBasis) {
+    await supabase.from("staff").update({ commission_basis: value }).eq("id", s.id);
+    loadData();
+  }
+
+  async function saveTotalSalesRate(staffId: string) {
+    const raw = totalSalesRateDrafts[staffId] ?? "";
+    const rate = raw.trim() === "" ? null : Number(raw) / 100;
+    await supabase.from("staff").update({ total_sales_commission_rate: rate }).eq("id", staffId);
+    loadData();
+  }
+
   async function openOwnerLock() {
     setPinError("");
     setPinInput("");
@@ -438,7 +461,8 @@ export default function SettingsPage() {
       commissionScheme,
       drinkBackAmount,
       isEligible,
-      commissionTaxBasisResolver(staff, commissionTaxBasis)
+      commissionTaxBasisResolver(staff, commissionTaxBasis),
+      totalSalesCommissionStaff(staff)
     );
     setMonthCommission(breakdown);
     setMonthCommissionLoaded(true);
@@ -513,7 +537,8 @@ export default function SettingsPage() {
       commissionScheme,
       drinkBackAmount,
       isEligible,
-      commissionTaxBasisResolver(staff, commissionTaxBasis)
+      commissionTaxBasisResolver(staff, commissionTaxBasis),
+      totalSalesCommissionStaff(staff)
     ).find((c) => c.staffId === payslipStaffId);
     const commission = myCommission?.commission ?? 0;
     const personalSales = myCommission?.salesWithTax ?? 0;
@@ -728,6 +753,42 @@ export default function SettingsPage() {
               <option value="with_tax">消費税込みの金額</option>
               <option value="pre_tax">消費税抜きの小計</option>
             </select>
+          </div>
+        )}
+
+        {s.commission_eligible && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-gray-500 shrink-0">歩合の対象</label>
+            <select
+              value={s.commission_basis}
+              onChange={(e) => saveCommissionBasis(s, e.target.value as CommissionBasis)}
+              className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+            >
+              <option value="own_tabs">自分の担当伝票のみ</option>
+              <option value="total_sales">店舗全体の売上</option>
+            </select>
+            {s.commission_basis === "total_sales" && (
+              <>
+                <input
+                  value={totalSalesRateDrafts[s.id] ?? ""}
+                  onChange={(e) => setTotalSalesRateDrafts((d) => ({ ...d, [s.id]: e.target.value }))}
+                  placeholder="歩合率(%)"
+                  inputMode="numeric"
+                  className="w-20 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                />
+                <span className="text-xs text-gray-500">%（店舗全体の売上が対象）</span>
+                <button
+                  onClick={() => saveTotalSalesRate(s.id)}
+                  disabled={
+                    (totalSalesRateDrafts[s.id] ?? "") ===
+                    (s.total_sales_commission_rate != null ? String(Math.round(s.total_sales_commission_rate * 100)) : "")
+                  }
+                  className="text-xs rounded-md border border-line px-2 py-1 text-gray-300 disabled:opacity-40"
+                >
+                  保存
+                </button>
+              </>
+            )}
           </div>
         )}
 

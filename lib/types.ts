@@ -13,6 +13,8 @@ export type Staff = {
   special_wage_days: number[] | null; // 対象曜日（0=日〜6=土）。null/空なら曜日条件なし
   special_wage_holiday: boolean; // 祝日も対象にするか
   commission_tax_basis_override: CommissionTaxBasis | null; // 歩合の計算基準を店舗設定と別に指定する場合の上書き値。null=店舗設定に従う
+  commission_basis: CommissionBasis; // 歩合の対象範囲。own_tabs=自分が担当した伝票の売上（通常）、total_sales=店舗全体の売上
+  total_sales_commission_rate: number | null; // commission_basis='total_sales'の場合に使う、その人専用の歩合率
 };
 
 export type MenuItem = {
@@ -292,6 +294,17 @@ export function commissionTaxBasisResolver(
   return (staffId: string) => staffList.find((s) => s.id === staffId)?.commission_tax_basis_override ?? storeDefault;
 }
 
+// 歩合の対象範囲。own_tabs=自分が担当した伝票の売上（通常）、total_sales=店舗全体の売上（この場合、通常の按分歩合の代わりにこちらだけを使う）
+export type CommissionBasis = "own_tabs" | "total_sales";
+export const DEFAULT_COMMISSION_BASIS: CommissionBasis = "own_tabs";
+
+// commission_basis='total_sales'のスタッフだけを、専用の歩合率つきで抽出する
+export function totalSalesCommissionStaff(staffList: Staff[]): Array<{ staffId: string; rate: number }> {
+  return staffList
+    .filter((s) => s.commission_basis === "total_sales" && s.total_sales_commission_rate != null)
+    .map((s) => ({ staffId: s.id, rate: s.total_sales_commission_rate as number }));
+}
+
 // 歩合給: 会計済み（closed_atがある）伝票の売上を、品目ごとの担当（tab_items.staff_id で個別指定があればそれ、
 // 無ければ伝票の担当 tabs.staff_id）で按分する。
 // 例: 伝票の担当はAさんだが、シャンパンだけBさんに個別指定した場合、シャンパン分だけBさんの歩合になる。
@@ -310,6 +323,10 @@ export function commissionTaxBasisResolver(
 // scheme="simple"（既定）: 按分した売上にcommissionRateを掛けるだけ。
 // scheme="drink_back": 按分した売上のうち、is_cast_drinkな品目分を除いた額にcommissionRateを掛けたもの（売上バック）に、
 //   is_cast_drink品目の数量×drinkBackAmount（ドリンクバック）を足す。
+//
+// totalSalesStaff: commission_basis='total_sales'のスタッフ（totalSalesCommissionStaff()で抽出）。
+//   このスタッフは、自分の担当伝票の按分歩合の代わりに、店舗全体の売上（担当有無を問わず全ての会計済み伝票の合計）に
+//   専用の歩合率を掛けた額をそのまま歩合にする（両方が重複計算されないよう、按分の対象からは除外する）。
 export function staffCommissionBreakdown(
   tabs: TabWithItems[],
   staffNameOf: (staffId: string | null) => string,
@@ -318,9 +335,24 @@ export function staffCommissionBreakdown(
   scheme: CommissionScheme = "simple",
   drinkBackAmount: number = DEFAULT_DRINK_BACK_AMOUNT,
   isCommissionEligible: (staffId: string) => boolean = () => true,
-  taxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS
+  taxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
+  totalSalesStaff: Array<{ staffId: string; rate: number }> = []
 ): StaffCommission[] {
   const map: Record<string, StaffCommission> = {};
+  const totalSalesStaffIds = new Set(totalSalesStaff.map((s) => s.staffId));
+  totalSalesStaff.forEach(({ staffId }) => {
+    map[staffId] = {
+      staffId,
+      name: staffNameOf(staffId),
+      salesExTax: 0,
+      salesWithTax: 0,
+      drinkCount: 0,
+      drinkBack: 0,
+      salesBack: 0,
+      commission: 0,
+    };
+  });
+
   tabs.forEach((t) => {
     if (!t.closed_at) return;
     const sub = tabSubtotal(t.tab_items);
@@ -335,13 +367,22 @@ export function staffCommissionBreakdown(
     const keepRatio = preDiscountTotal > 0 ? adjustedTotal / preDiscountTotal : 1;
     const preTaxAdjustedTotal = sub * keepRatio;
 
-    // 品目ごとの個別指定があればそれを優先、無ければ伝票の担当スタッフ（未設定・歩合対象外は集計しない）
+    // 店舗全体の売上を対象とする歩合（担当かどうかは問わず、この伝票の実額をまるごと積算する）
+    totalSalesStaff.forEach(({ staffId, rate }) => {
+      const basis = taxBasisFor(staffId) === "pre_tax" ? preTaxAdjustedTotal : roundedTotal;
+      map[staffId].salesExTax += sub;
+      map[staffId].salesWithTax += basis;
+      map[staffId].commission += basis * rate;
+    });
+
+    // 品目ごとの個別指定があればそれを優先、無ければ伝票の担当スタッフ（未設定・歩合対象外・総売上歩合の人は集計しない）
     const byStaff: Record<string, number> = {};
     const byStaffDrink: Record<string, number> = {};
     const byStaffDrinkQty: Record<string, number> = {};
     t.tab_items.forEach((i) => {
       const effectiveStaffId = i.staff_id ?? t.staff_id;
-      if (!effectiveStaffId || !isCommissionEligible(effectiveStaffId)) return;
+      if (!effectiveStaffId || !isCommissionEligible(effectiveStaffId) || totalSalesStaffIds.has(effectiveStaffId))
+        return;
       byStaff[effectiveStaffId] = (byStaff[effectiveStaffId] ?? 0) + itemSubtotal(i);
       if (i.is_cast_drink) {
         byStaffDrink[effectiveStaffId] = (byStaffDrink[effectiveStaffId] ?? 0) + itemSubtotal(i);
@@ -418,7 +459,8 @@ export function daySummary(
   commissionScheme: CommissionScheme = "simple",
   drinkBackAmount: number = DEFAULT_DRINK_BACK_AMOUNT,
   isCommissionEligible: (staffId: string) => boolean = () => true,
-  commissionTaxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS
+  commissionTaxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
+  totalSalesStaff: Array<{ staffId: string; rate: number }> = []
 ): DaySummary {
   const subtotal = tabs.reduce((a, t) => a + tabSubtotal(t.tab_items), 0);
   const tax = tabs.reduce((a, t) => a + tabTax(t.tab_items, taxRate), 0);
@@ -431,7 +473,8 @@ export function daySummary(
     commissionScheme,
     drinkBackAmount,
     isCommissionEligible,
-    commissionTaxBasisFor
+    commissionTaxBasisFor,
+    totalSalesStaff
   ).reduce(
     (a, c) => a + c.commission,
     0

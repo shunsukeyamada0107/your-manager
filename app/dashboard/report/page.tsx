@@ -26,6 +26,7 @@ import {
   staffCommissionBreakdown,
   hourlyLaborBreakdown,
   commissionTaxBasisResolver,
+  totalSalesCommissionStaff,
 } from "@/lib/types";
 import { generateInsights } from "@/lib/insights";
 import { MonthlySalesChart, ChartPoint } from "@/lib/MonthlySalesChart";
@@ -480,6 +481,7 @@ export default function ReportPage() {
     };
     const isEligibleOf = (staffId: string) => (staffData ?? []).find((x) => x.id === staffId)?.commission_eligible ?? true;
     const taxBasisOfMonth = commissionTaxBasisResolver(staffData ?? [], commissionTaxBasis);
+    const totalSalesStaffOfMonth = totalSalesCommissionStaff(staffData ?? []);
 
     const rows: DayRow[] = Array.from(dates)
       .sort()
@@ -503,7 +505,8 @@ export default function ReportPage() {
             commissionScheme,
             drinkBackAmount,
             isEligibleOf,
-            taxBasisOfMonth
+            taxBasisOfMonth,
+            totalSalesStaffOfMonth
           ),
         };
       });
@@ -522,7 +525,8 @@ export default function ReportPage() {
         commissionScheme,
         drinkBackAmount,
         isEligibleOf,
-        taxBasisOfMonth
+        taxBasisOfMonth,
+        totalSalesStaffOfMonth
       )
     );
   }, [
@@ -592,6 +596,7 @@ export default function ReportPage() {
     return staff.find((x) => x.id === staffId)?.commission_eligible ?? true;
   }
   const taxBasisOf = commissionTaxBasisResolver(staff, commissionTaxBasis);
+  const totalSalesStaffList = totalSalesCommissionStaff(staff);
 
   const summary = daySummary(
     tabs,
@@ -603,7 +608,8 @@ export default function ReportPage() {
     commissionScheme,
     drinkBackAmount,
     isEligible,
-    taxBasisOf
+    taxBasisOf,
+    totalSalesStaffList
   );
   const commission = staffCommissionBreakdown(
     tabs,
@@ -613,7 +619,8 @@ export default function ReportPage() {
     commissionScheme,
     drinkBackAmount,
     isEligible,
-    taxBasisOf
+    taxBasisOf,
+    totalSalesStaffList
   );
   const hourlyLabor = hourlyLaborBreakdown(attendance, staffName);
   const laborRows = buildLaborRows(hourlyLabor, commission, staff);
@@ -665,7 +672,8 @@ export default function ReportPage() {
     commissionScheme,
     drinkBackAmount,
     isEligible,
-    taxBasisOf
+    taxBasisOf,
+    totalSalesStaffList
   );
   const monthHourlyLabor = hourlyLaborBreakdown(monthAttRaw, staffName);
   const monthLaborRows = buildLaborRows(monthHourlyLabor, monthCommission, staff);
