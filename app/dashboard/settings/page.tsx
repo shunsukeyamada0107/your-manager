@@ -9,11 +9,14 @@ import {
   Attendance,
   MenuItem,
   Staff,
+  Customer,
+  CustomerStats,
   CommissionScheme,
   CommissionTaxBasis,
   DEFAULT_DRINK_BACK_AMOUNT,
   PayCycle,
   StaffCommission,
+  StoreMode,
   TabLog,
   TabWithItems,
   UNCATEGORIZED_LABEL,
@@ -22,6 +25,7 @@ import {
   commissionTaxBasisResolver,
   totalSalesCommissionStaff,
   commissionRateResolver,
+  customerStats,
   CommissionBasis,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
@@ -128,11 +132,26 @@ export default function SettingsPage() {
     commissionTaxBasis,
     reportPinRequired,
     settingsPinRequired,
+    storeMode,
     loading: storeLoading,
     reload,
   } = useStore();
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  type CustomerDraft = {
+    name: string;
+    nameKana: string;
+    phone: string;
+    birthday: string;
+    primaryStaffId: string; // "" = 未設定
+    bottleKeep: string;
+    memo: string;
+  };
+  const [customerDrafts, setCustomerDrafts] = useState<Record<string, CustomerDraft>>({});
+  const [customerStatsById, setCustomerStatsById] = useState<Record<string, CustomerStats>>({});
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerKana, setNewCustomerKana] = useState("");
   const [tabLogs, setTabLogs] = useState<TabLog[]>([]);
   const [menuName, setMenuName] = useState("");
   const [menuPrice, setMenuPrice] = useState("");
@@ -190,6 +209,7 @@ export default function SettingsPage() {
   const [cashFloatDraft, setCashFloatDraft] = useState(String(cashFloatAmount));
   const [accentColorDraft, setAccentColorDraft] = useState(accentColor);
   const [themeDraft, setThemeDraft] = useState<StoreTheme>(theme);
+  const [storeModeDraft, setStoreModeDraft] = useState<StoreMode>(storeMode);
   const [showInsightsDraft, setShowInsightsDraft] = useState(showInsights);
   const [acceptsCardDraft, setAcceptsCardDraft] = useState(acceptsCard);
   const [acceptsPaypayDraft, setAcceptsPaypayDraft] = useState(acceptsPaypay);
@@ -216,6 +236,7 @@ export default function SettingsPage() {
     setCommissionSchemeDraft(commissionScheme);
     setDrinkBackAmountDraft(String(drinkBackAmount));
     setThemeDraft(theme);
+    setStoreModeDraft(storeMode);
     setShowInsightsDraft(showInsights);
     setAcceptsCardDraft(acceptsCard);
     setAcceptsPaypayDraft(acceptsPaypay);
@@ -235,6 +256,7 @@ export default function SettingsPage() {
     commissionScheme,
     drinkBackAmount,
     theme,
+    storeMode,
     showInsights,
     acceptsCard,
     acceptsPaypay,
@@ -314,7 +336,54 @@ export default function SettingsPage() {
       .order("created_at", { ascending: false })
       .limit(100);
     setTabLogs((tabLogsData as TabLog[]) ?? []);
-  }, [storeId]);
+
+    // クラブモードの店舗でのみ顧客一覧・来店統計を読み込む（バーモードでは何もしない）
+    if (storeMode === "club") {
+      const { data: customersData } = await supabase
+        .from("customers")
+        .select("*")
+        .eq("store_id", storeId)
+        .eq("active", true)
+        .order("created_at", { ascending: true });
+      setCustomers((customersData as Customer[]) ?? []);
+      setCustomerDrafts(
+        Object.fromEntries(
+          ((customersData as Customer[]) ?? []).map((c) => [
+            c.id,
+            {
+              name: c.name,
+              nameKana: c.name_kana ?? "",
+              phone: c.phone ?? "",
+              birthday: c.birthday ?? "",
+              primaryStaffId: c.primary_staff_id ?? "",
+              bottleKeep: c.bottle_keep ?? "",
+              memo: c.memo,
+            },
+          ])
+        )
+      );
+
+      // 来店回数・累計売上・最終来店日は保存せず、customer_idで絞ったtabsから都度計算する
+      const { data: customerTabsData } = await supabase
+        .from("tabs")
+        .select("*, tab_items(*)")
+        .eq("store_id", storeId)
+        .not("customer_id", "is", null);
+      const tabsByCustomer: Record<string, TabWithItems[]> = {};
+      ((customerTabsData as TabWithItems[]) ?? []).forEach((t) => {
+        if (!t.customer_id) return;
+        (tabsByCustomer[t.customer_id] ??= []).push(t);
+      });
+      setCustomerStatsById(
+        Object.fromEntries(
+          ((customersData as Customer[]) ?? []).map((c) => [c.id, customerStats(tabsByCustomer[c.id] ?? [], taxRate)])
+        )
+      );
+    } else {
+      setCustomers([]);
+      setCustomerStatsById({});
+    }
+  }, [storeId, storeMode, taxRate]);
 
   useEffect(() => {
     loadData();
@@ -686,6 +755,41 @@ export default function SettingsPage() {
     loadData();
   }
 
+  async function addCustomer() {
+    if (!storeId || !newCustomerName.trim()) return;
+    await supabase.from("customers").insert({
+      store_id: storeId,
+      name: newCustomerName.trim(),
+      name_kana: newCustomerKana.trim() || null,
+    });
+    setNewCustomerName("");
+    setNewCustomerKana("");
+    loadData();
+  }
+
+  async function removeCustomer(id: string) {
+    await supabase.from("customers").update({ active: false }).eq("id", id);
+    loadData();
+  }
+
+  async function saveCustomerRow(id: string) {
+    const d = customerDrafts[id];
+    if (!d || !d.name.trim()) return;
+    await supabase
+      .from("customers")
+      .update({
+        name: d.name.trim(),
+        name_kana: d.nameKana.trim() || null,
+        phone: d.phone.trim() || null,
+        birthday: d.birthday || null,
+        primary_staff_id: d.primaryStaffId || null,
+        bottle_keep: d.bottleKeep.trim() || null,
+        memo: d.memo,
+      })
+      .eq("id", id);
+    loadData();
+  }
+
   async function saveStoreSettings() {
     if (!storeId || !storeNameDraft.trim()) return;
     setSavingStoreSettings(true);
@@ -701,6 +805,7 @@ export default function SettingsPage() {
         commission_scheme: commissionSchemeDraft,
         drink_back_amount: Number(drinkBackAmountDraft) || 0,
         theme: themeDraft,
+        store_mode: storeModeDraft,
         show_insights: showInsightsDraft,
         accepts_card: acceptsCardDraft,
         accepts_paypay: acceptsPaypayDraft,
@@ -922,6 +1027,90 @@ export default function SettingsPage() {
     );
   }
 
+  function renderCustomerRow(c: Customer) {
+    const d = customerDrafts[c.id] ?? {
+      name: c.name,
+      nameKana: c.name_kana ?? "",
+      phone: c.phone ?? "",
+      birthday: c.birthday ?? "",
+      primaryStaffId: c.primary_staff_id ?? "",
+      bottleKeep: c.bottle_keep ?? "",
+      memo: c.memo,
+    };
+    const stats = customerStatsById[c.id];
+    return (
+      <div key={c.id} className="px-3 py-2 space-y-2">
+        <div className="flex justify-between items-center gap-2">
+          <input
+            value={d.name}
+            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, name: e.target.value } }))}
+            className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1 text-sm"
+          />
+          <button onClick={() => removeCustomer(c.id)} className="text-rose text-xs shrink-0">
+            削除
+          </button>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <input
+            value={d.nameKana}
+            placeholder="フリガナ"
+            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, nameKana: e.target.value } }))}
+            className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+          />
+          <input
+            value={d.phone}
+            placeholder="電話番号"
+            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, phone: e.target.value } }))}
+            className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+          />
+          <input
+            type="date"
+            value={d.birthday}
+            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, birthday: e.target.value } }))}
+            className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+          />
+          <select
+            value={d.primaryStaffId}
+            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, primaryStaffId: e.target.value } }))}
+            className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+          >
+            <option value="">担当キャスト未設定</option>
+            {staff.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <input
+          value={d.bottleKeep}
+          placeholder="ボトルキープ（棚番号・銘柄など）"
+          onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, bottleKeep: e.target.value } }))}
+          className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+        />
+        <textarea
+          value={d.memo}
+          placeholder="メモ"
+          rows={2}
+          onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, memo: e.target.value } }))}
+          className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+        />
+        {stats && (
+          <div className="text-xs text-gray-500">
+            来店 {stats.visitCount}回 ・ 累計 ¥{stats.totalSales.toLocaleString()} ・ 最終来店{" "}
+            {stats.lastVisitDate ?? "-"}
+          </div>
+        )}
+        <button
+          onClick={() => saveCustomerRow(c.id)}
+          className="text-xs rounded-md border border-line px-2 py-1 text-gray-300"
+        >
+          保存
+        </button>
+      </div>
+    );
+  }
+
   return (
     <OwnerPinGate
       storeId={storeId}
@@ -1082,6 +1271,32 @@ export default function SettingsPage() {
               />
               <span className="text-xs text-gray-400 font-mono">{accentColorDraft}</span>
               <span className="text-xs text-gray-500">（自由に色を指定することもできます）</span>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">運用モード</label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setStoreModeDraft("bar")}
+                className={`flex-1 rounded-md border px-3 py-1.5 text-sm ${
+                  storeModeDraft === "bar" ? "border-gold text-gold bg-gold/10" : "border-line text-gray-400"
+                }`}
+              >
+                🍸 バー
+              </button>
+              <button
+                type="button"
+                onClick={() => setStoreModeDraft("club")}
+                className={`flex-1 rounded-md border px-3 py-1.5 text-sm ${
+                  storeModeDraft === "club" ? "border-gold text-gold bg-gold/10" : "border-line text-gray-400"
+                }`}
+              >
+                🥂 クラブ
+              </button>
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              「クラブ」にすると、伝票作成時に登録済みの顧客を選ぶことが必須になり、下に「顧客管理」セクションが表示されます。
             </div>
           </div>
           <div>
@@ -1482,6 +1697,41 @@ export default function SettingsPage() {
           </button>
         </div>
       </div>
+
+      {storeMode === "club" && (
+        <div className="rounded-xl border border-line p-4">
+          <SectionHeader icon={<PeopleSectionIcon />}>顧客管理</SectionHeader>
+          {customers.length === 0 ? (
+            <div className="rounded-xl border border-line bg-elevated">
+              <div className="text-sm text-gray-500 text-center py-6">顧客が未登録です</div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-line bg-elevated divide-y divide-line">
+              {customers.map(renderCustomerRow)}
+            </div>
+          )}
+          <div className="mt-2 rounded-xl border border-dashed border-line p-3 flex gap-2">
+            <input
+              value={newCustomerName}
+              onChange={(e) => setNewCustomerName(e.target.value)}
+              placeholder="顧客名"
+              className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+            />
+            <input
+              value={newCustomerKana}
+              onChange={(e) => setNewCustomerKana(e.target.value)}
+              placeholder="フリガナ(任意)"
+              className="w-28 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+            />
+            <button
+              onClick={addCustomer}
+              className="rounded-md px-3 py-1.5 text-sm border border-dashed border-gold text-gold shrink-0"
+            >
+              ＋ 追加
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="rounded-xl border border-line p-4">
         <SectionHeader icon={<ListSectionIcon />}>伝票ログ（作成・削除の履歴）</SectionHeader>

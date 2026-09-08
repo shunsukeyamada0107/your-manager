@@ -11,6 +11,7 @@ import {
   CommissionScheme,
   CommissionTaxBasis,
   PayCycle,
+  StoreMode,
 } from "@/lib/types";
 import { StoreTheme } from "@/lib/theme";
 
@@ -38,6 +39,7 @@ type StoreContextValue = {
   commissionTaxBasis: CommissionTaxBasis;
   reportPinRequired: boolean;
   settingsPinRequired: boolean;
+  storeMode: StoreMode;
   loading: boolean;
   reload: () => void;
 };
@@ -66,6 +68,7 @@ const StoreContext = createContext<StoreContextValue>({
   commissionTaxBasis: DEFAULT_COMMISSION_TAX_BASIS,
   reportPinRequired: false,
   settingsPinRequired: false,
+  storeMode: "bar",
   loading: true,
   reload: () => {},
 });
@@ -93,6 +96,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [commissionTaxBasis, setCommissionTaxBasis] = useState<CommissionTaxBasis>(DEFAULT_COMMISSION_TAX_BASIS);
   const [reportPinRequired, setReportPinRequired] = useState(false);
   const [settingsPinRequired, setSettingsPinRequired] = useState(false);
+  const [storeMode, setStoreMode] = useState<StoreMode>("bar");
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -109,7 +113,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const { data: member } = await supabase
         .from("store_members")
         .select(
-          "store_id, stores(name, tax_rate, commission_rate, business_day_cutoff_hour, report_template, cash_float_amount, accent_color, commission_scheme, drink_back_amount, theme, show_insights, accepts_card, accepts_paypay, accepts_other_epayment, enable_name_search, name_input_mode, pay_cycle, commission_tax_basis, report_pin_required, settings_pin_required)"
+          "store_id, stores(name, tax_rate, commission_rate, business_day_cutoff_hour, report_template, cash_float_amount, accent_color, commission_scheme, drink_back_amount, theme, show_insights, accepts_card, accepts_paypay, accepts_other_epayment, enable_name_search, name_input_mode, pay_cycle, commission_tax_basis, report_pin_required, settings_pin_required, store_mode)"
         )
         .eq("user_id", userData.user.id)
         .limit(1)
@@ -138,6 +142,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           commission_tax_basis: CommissionTaxBasis | null;
           report_pin_required: boolean | null;
           settings_pin_required: boolean | null;
+          store_mode: StoreMode | null;
         };
         const stores = member.stores as unknown as StoreRow | StoreRow[] | null;
         const store = Array.isArray(stores) ? stores[0] : stores;
@@ -161,6 +166,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setCommissionTaxBasis(store?.commission_tax_basis ?? DEFAULT_COMMISSION_TAX_BASIS);
         setReportPinRequired(store?.report_pin_required ?? false);
         setSettingsPinRequired(store?.settings_pin_required ?? false);
+        setStoreMode(store?.store_mode ?? "bar");
       }
       setLoading(false);
     }
@@ -191,6 +197,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         commissionTaxBasis,
         reportPinRequired,
         settingsPinRequired,
+        storeMode,
         loading,
         reload,
       }}

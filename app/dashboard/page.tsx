@@ -8,6 +8,7 @@ import { useBusinessDate } from "@/lib/BusinessDateContext";
 import { DateBar } from "@/lib/DateBar";
 import {
   categoryColorFor,
+  Customer,
   MenuItem,
   PAYMENT_METHOD_EMOJI,
   PAYMENT_METHOD_LABELS,
@@ -25,6 +26,21 @@ import {
 import { AnimatedNumber } from "@/lib/AnimatedNumber";
 
 const LAST_ORDER_WINDOW_MS = 30 * 60 * 1000;
+
+// クラブモードの伝票詳細に表示する顧客情報（画面表示に必要な項目だけ）
+type CustomerBrief = Pick<Customer, "name" | "name_kana" | "phone" | "birthday" | "bottle_keep" | "memo">;
+type TabRow = TabWithItems & { customers: CustomerBrief | null };
+
+// クラブモードの伝票作成モーダルで、新規顧客登録フォームの初期値として使う
+const EMPTY_CUSTOMER_DRAFT = {
+  name: "",
+  nameKana: "",
+  phone: "",
+  birthday: "",
+  primaryStaffId: "",
+  bottleKeep: "",
+  memo: "",
+};
 
 // 伝票詳細のセクションは1セクション=1色にして、パッと見でどのブロックか判別できるようにする
 type SectionTone = "gold" | "blue" | "purple" | "good" | "warn" | "rose";
@@ -186,11 +202,12 @@ function POSPageInner() {
     acceptsOtherEpayment,
     enableNameSearch,
     nameInputMode,
+    storeMode,
   } = useStore();
   const { date: businessDate } = useBusinessDate();
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
-  const [tabs, setTabs] = useState<TabWithItems[]>([]);
+  const [tabs, setTabs] = useState<TabRow[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [justCreatedTabId, setJustCreatedTabId] = useState<string | null>(null);
@@ -198,6 +215,13 @@ function POSPageInner() {
   const [modalName, setModalName] = useState("");
   const [nameSearchResults, setNameSearchResults] = useState<TabWithItems[]>([]);
   const [searchingName, setSearchingName] = useState(false);
+  // クラブモード：顧客検索・選択・新規顧客登録
+  const [customerSearchResults, setCustomerSearchResults] = useState<Customer[]>([]);
+  const [searchingCustomer, setSearchingCustomer] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
+  const [newCustomerDraft, setNewCustomerDraft] = useState(EMPTY_CUSTOMER_DRAFT);
+  const [creatingCustomer, setCreatingCustomer] = useState(false);
   const [modalGuestCount, setModalGuestCount] = useState("");
   const [modalGuestMale, setModalGuestMale] = useState("");
   const [modalGuestFemale, setModalGuestFemale] = useState("");
@@ -263,12 +287,20 @@ function POSPageInner() {
 
     const { data: tabsData } = await supabase
       .from("tabs")
-      .select("*, tab_items(*)")
+      .select("*, tab_items(*), customers(name, name_kana, phone, birthday, bottle_keep, memo)")
       .eq("store_id", storeId)
       .eq("business_date", businessDate)
       .order("created_at", { ascending: true })
       .order("created_at", { foreignTable: "tab_items", ascending: true });
-    setTabs((tabsData as TabWithItems[]) ?? []);
+    // customer_id -> customersは単一FKだが、PostgRESTの状態によっては配列で返ることがあるため防御的に正規化する
+    // （lib/StoreContext.tsxのstoresネスト結果の正規化と同じパターン）
+    const normalized = ((tabsData as unknown as Array<TabWithItems & { customers: CustomerBrief | CustomerBrief[] | null }>) ?? []).map(
+      (t) => ({
+        ...t,
+        customers: Array.isArray(t.customers) ? t.customers[0] ?? null : t.customers,
+      })
+    );
+    setTabs(normalized);
   }, [storeId, businessDate]);
 
   useEffect(() => {
@@ -276,9 +308,9 @@ function POSPageInner() {
     setActiveTabId(null);
   }, [loadData]);
 
-  // 伝票作成モーダルで名前を入力した時、同じ名前の過去の伝票をあいまい検索する（デバウンス付き）
+  // バーモード：伝票作成モーダルで名前を入力した時、同じ名前の過去の伝票をあいまい検索する（デバウンス付き）
   useEffect(() => {
-    if (!showCreateModal || !storeId || !enableNameSearch || !modalName.trim()) {
+    if (storeMode === "club" || !showCreateModal || !storeId || !enableNameSearch || !modalName.trim()) {
       setNameSearchResults([]);
       setSearchingName(false);
       return;
@@ -298,7 +330,46 @@ function POSPageInner() {
     }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modalName, showCreateModal, storeId, enableNameSearch]);
+  }, [modalName, showCreateModal, storeId, enableNameSearch, storeMode]);
+
+  // クラブモード：伝票作成モーダルで顧客名・フリガナをあいまい検索する（デバウンス付き）
+  useEffect(() => {
+    if (storeMode !== "club" || !showCreateModal || !storeId || selectedCustomer || !modalName.trim()) {
+      setCustomerSearchResults([]);
+      setSearchingCustomer(false);
+      return;
+    }
+    const query = modalName.trim();
+    setSearchingCustomer(true);
+    const t = setTimeout(async () => {
+      // .or()でのPostgREST文字列組み立ては特殊文字のエスケープが必要で壊れやすいため、
+      // 名前検索とフリガナ検索を2本の独立クエリにしてクライアント側でID重複を除いてマージする
+      const [byName, byKana] = await Promise.all([
+        supabase
+          .from("customers")
+          .select("*")
+          .eq("store_id", storeId)
+          .eq("active", true)
+          .ilike("name", `${query}%`)
+          .order("created_at", { ascending: false })
+          .limit(5),
+        supabase
+          .from("customers")
+          .select("*")
+          .eq("store_id", storeId)
+          .eq("active", true)
+          .ilike("name_kana", `${query}%`)
+          .order("created_at", { ascending: false })
+          .limit(5),
+      ]);
+      const merged = new Map<string, Customer>();
+      [...(byName.data ?? []), ...(byKana.data ?? [])].forEach((c) => merged.set(c.id, c as Customer));
+      setCustomerSearchResults(Array.from(merged.values()).slice(0, 5));
+      setSearchingCustomer(false);
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalName, showCreateModal, storeId, storeMode, selectedCustomer]);
 
   // 集計タブなどから ?tab=<id> で遷移してきた場合、その伝票を自動で開く
   useEffect(() => {
@@ -309,7 +380,7 @@ function POSPageInner() {
   }, [searchParams, tabs]);
 
   // tab_items の連続操作（連打）が競合しないよう、常に最新の状態を同期的に参照するためのref
-  const tabsRef = useRef<TabWithItems[]>([]);
+  const tabsRef = useRef<TabRow[]>([]);
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
@@ -412,7 +483,43 @@ function POSPageInner() {
     setModalGuestMale("");
     setModalGuestFemale("");
     setModalStaffId(null);
+    setSelectedCustomer(null);
+    setCustomerSearchResults([]);
+    setShowNewCustomerForm(false);
+    setNewCustomerDraft(EMPTY_CUSTOMER_DRAFT);
     setShowCreateModal(true);
+  }
+
+  function selectCustomerForTab(customer: Customer) {
+    setSelectedCustomer(customer);
+    setModalName(customer.name);
+    setModalStaffId(customer.primary_staff_id ?? null);
+    setCustomerSearchResults([]);
+    setShowNewCustomerForm(false);
+  }
+
+  async function createCustomerAndProceed() {
+    if (!storeId || !newCustomerDraft.name.trim()) return;
+    setCreatingCustomer(true);
+    const { data, error } = await supabase
+      .from("customers")
+      .insert({
+        store_id: storeId,
+        name: newCustomerDraft.name.trim(),
+        name_kana: newCustomerDraft.nameKana.trim() || null,
+        phone: newCustomerDraft.phone.trim() || null,
+        birthday: newCustomerDraft.birthday || null,
+        primary_staff_id: newCustomerDraft.primaryStaffId || null,
+        bottle_keep: newCustomerDraft.bottleKeep.trim() || null,
+        memo: newCustomerDraft.memo.trim(),
+      })
+      .select()
+      .single();
+    setCreatingCustomer(false);
+    if (!error && data) {
+      selectCustomerForTab(data as Customer);
+      setNewCustomerDraft(EMPTY_CUSTOMER_DRAFT);
+    }
   }
 
   function applyDakuten() {
@@ -440,13 +547,24 @@ function POSPageInner() {
   }
 
   async function createTab() {
-    if (!storeId || !modalName.trim()) return;
+    if (!storeId) return;
+    if (storeMode === "club") {
+      if (!selectedCustomer) return;
+      return insertTab({ name: selectedCustomer.name, customer_id: selectedCustomer.id });
+    }
+    if (!modalName.trim()) return;
+    return insertTab({ name: modalName.trim(), customer_id: null });
+  }
+
+  async function insertTab(payload: { name: string; customer_id: string | null }) {
+    if (!storeId) return;
     const { data, error } = await supabase
       .from("tabs")
       .insert({
         store_id: storeId,
         business_date: businessDate,
-        name: modalName.trim(),
+        name: payload.name,
+        customer_id: payload.customer_id,
         guest_count: modalGuestCount.trim() === "" ? null : Number(modalGuestCount),
         guest_count_male: modalGuestMale.trim() === "" ? null : Number(modalGuestMale),
         guest_count_female: modalGuestFemale.trim() === "" ? null : Number(modalGuestFemale),
@@ -1297,6 +1415,16 @@ function POSPageInner() {
 
             {activeTab.course_ends_at && <CourseTimerBadge endsAt={activeTab.course_ends_at} now={now} />}
 
+            {activeTab.customer_id && activeTab.customers && (
+              <div className="rounded-lg border border-line bg-bg2 px-3 py-2 text-xs text-gray-300 space-y-0.5">
+                <div className="text-gray-500 font-bold">👤 顧客情報</div>
+                {activeTab.customers.phone && <div>📞 {activeTab.customers.phone}</div>}
+                {activeTab.customers.birthday && <div>🎂 {activeTab.customers.birthday}</div>}
+                {activeTab.customers.bottle_keep && <div>🍾 {activeTab.customers.bottle_keep}</div>}
+                {activeTab.customers.memo && <div className="whitespace-pre-wrap">📝 {activeTab.customers.memo}</div>}
+              </div>
+            )}
+
             {notifyPermission === "default" && (
               <button
                 onClick={requestNotifyPermission}
@@ -1808,6 +1936,128 @@ function POSPageInner() {
           >
             <div className="text-gold font-bold text-base">伝票を作る</div>
 
+            {storeMode === "club" ? (
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">お客様（登録済みの顧客から選択）</label>
+                <input
+                  autoFocus
+                  value={modalName}
+                  onChange={(e) => {
+                    setModalName(e.target.value);
+                    setSelectedCustomer(null);
+                  }}
+                  placeholder="名前・フリガナで検索"
+                  className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                />
+
+                {selectedCustomer && (
+                  <div className="mt-1.5 text-xs text-gold">✓ {selectedCustomer.name} を選択中</div>
+                )}
+
+                {!selectedCustomer &&
+                  modalName.trim() &&
+                  (searchingCustomer ? (
+                    <div className="text-xs text-gray-500 mt-1.5">検索中...</div>
+                  ) : (
+                    <div className="mt-1.5 space-y-1.5">
+                      {customerSearchResults.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => selectCustomerForTab(c)}
+                          className="w-full text-left rounded-lg border border-line bg-bg2 px-3 py-2"
+                        >
+                          <div className="text-sm font-bold text-gray-200">{c.name}</div>
+                          {c.name_kana && <div className="text-xs text-gray-500">{c.name_kana}</div>}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowNewCustomerForm(true);
+                          setNewCustomerDraft((d) => ({ ...d, name: modalName.trim() }));
+                        }}
+                        className="w-full text-left rounded-lg border border-dashed border-gold text-gold px-3 py-2 text-sm"
+                      >
+                        ＋ 新規顧客登録「{modalName.trim()}」
+                      </button>
+                    </div>
+                  ))}
+
+                {showNewCustomerForm && (
+                  <div className="mt-2 rounded-lg border border-gold/50 bg-bg2 p-3 space-y-2">
+                    <input
+                      value={newCustomerDraft.name}
+                      onChange={(e) => setNewCustomerDraft((d) => ({ ...d, name: e.target.value }))}
+                      placeholder="お名前"
+                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                    />
+                    <input
+                      value={newCustomerDraft.nameKana}
+                      onChange={(e) => setNewCustomerDraft((d) => ({ ...d, nameKana: e.target.value }))}
+                      placeholder="フリガナ(任意)"
+                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                    />
+                    <input
+                      value={newCustomerDraft.phone}
+                      onChange={(e) => setNewCustomerDraft((d) => ({ ...d, phone: e.target.value }))}
+                      placeholder="電話番号(任意)"
+                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                    />
+                    <input
+                      type="date"
+                      value={newCustomerDraft.birthday}
+                      onChange={(e) => setNewCustomerDraft((d) => ({ ...d, birthday: e.target.value }))}
+                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                    />
+                    {staff.length > 0 && (
+                      <select
+                        value={newCustomerDraft.primaryStaffId}
+                        onChange={(e) => setNewCustomerDraft((d) => ({ ...d, primaryStaffId: e.target.value }))}
+                        className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                      >
+                        <option value="">担当キャスト未設定</option>
+                        {staff.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      value={newCustomerDraft.bottleKeep}
+                      onChange={(e) => setNewCustomerDraft((d) => ({ ...d, bottleKeep: e.target.value }))}
+                      placeholder="ボトルキープ(任意)"
+                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                    />
+                    <textarea
+                      value={newCustomerDraft.memo}
+                      onChange={(e) => setNewCustomerDraft((d) => ({ ...d, memo: e.target.value }))}
+                      placeholder="メモ(任意)"
+                      rows={2}
+                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowNewCustomerForm(false)}
+                        className="flex-1 rounded-md border border-line py-1.5 text-xs text-gray-300"
+                      >
+                        キャンセル
+                      </button>
+                      <button
+                        type="button"
+                        onClick={createCustomerAndProceed}
+                        disabled={!newCustomerDraft.name.trim() || creatingCustomer}
+                        className="flex-1 rounded-md bg-gold text-bg py-1.5 text-xs font-bold disabled:opacity-50"
+                      >
+                        {creatingCustomer ? "登録中..." : "登録して続ける"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
             <div>
               <label className="block text-xs text-gray-400 mb-1">名前・卓番</label>
               <input
@@ -1914,6 +2164,7 @@ function POSPageInner() {
                   <div className="text-xs text-gray-500 mt-1.5">一致する過去の伝票はありません</div>
                 ))}
             </div>
+            )}
 
             <div>
               <label className="block text-xs text-gray-400 mb-1">人数（任意）</label>
@@ -1978,7 +2229,7 @@ function POSPageInner() {
               </button>
               <button
                 onClick={createTab}
-                disabled={!modalName.trim()}
+                disabled={storeMode === "club" ? !selectedCustomer : !modalName.trim()}
                 className="flex-1 rounded-md bg-gold text-bg py-2.5 text-sm font-bold disabled:opacity-50"
               >
                 作成する

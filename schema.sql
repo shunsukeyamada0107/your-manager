@@ -37,6 +37,7 @@ create table stores (
   accepts_other_epayment    boolean not null default false, -- 電子決済としてその他（PayPay/カード以外）を受け付けるか
   enable_name_search        boolean not null default true,  -- 伝票を作る画面で、同じ名前の過去の伝票を検索表示するか
   name_input_mode           text not null default 'keyboard' check (name_input_mode in ('keyboard','kana_keypad')), -- 伝票の名前欄の入力方法（keyboard=通常のキーボード、kana_keypad=カタカナ専用ボタン）
+  store_mode                text not null default 'bar' check (store_mode in ('bar','club')), -- 店舗の運用モード（bar=通常のバー運用、club=クラブモード。伝票作成前に顧客の事前登録を必須にする等の挙動を切り替える）
   organization_id           uuid references organizations(id) on delete set null, -- 複数店舗を運営する組織に属する場合
   owner_pin                 text, -- 設定タブの「オーナー専用」情報を開くための暗証番号。ログインアカウントは店舗で共有するため別途用意（DB上は平文。閲覧はRLSで店舗メンバーのみに制限されるが、あくまで同じ端末を使うスタッフからオーナー情報を隠すためのUI上のロックであり、暗号強度のセキュリティではない）
   report_pin_required       boolean not null default false, -- 集計タブを開く際にオーナー専用の暗証番号(owner_pin)入力を必須にするか
@@ -93,6 +94,24 @@ create table staff (
 );
 
 -- ------------------------------------------------------------
+-- 3b. 顧客（クラブモード用。伝票作成前に事前登録が必須になる会員情報。
+--     バーモードの店舗では使わない想定。staffテーブルと同じ構造・RLS方針を踏襲）
+-- ------------------------------------------------------------
+create table customers (
+  id                uuid primary key default gen_random_uuid(),
+  store_id          uuid not null references stores(id) on delete cascade,
+  name              text not null,
+  name_kana         text,              -- フリガナ（カナ検索・並び替え用）
+  phone             text,
+  birthday          date,
+  primary_staff_id  uuid references staff(id) on delete set null, -- 担当キャスト・指名
+  bottle_keep       text,              -- ボトルキープの棚番号・銘柄などの自由記述（memoとは別枠で管理したい情報）
+  memo              text not null default '',
+  active            boolean not null default true, -- ソフトデリート（staff.activeと同じ方式）
+  created_at        timestamptz not null default now()
+);
+
+-- ------------------------------------------------------------
 -- 4. メニュー
 -- ------------------------------------------------------------
 create table menu_items (
@@ -117,7 +136,8 @@ create table tabs (
   id              uuid primary key default gen_random_uuid(),
   store_id        uuid not null references stores(id) on delete cascade,
   business_date   date not null,      -- 朝6時基準の営業日
-  name            text not null,      -- お客様名・卓番
+  name            text not null,      -- お客様名・卓番（クラブモードでは作成時点の顧客名のスナップショット。customerの名前が後で変わっても過去の伝票表示は変わらない）
+  customer_id     uuid references customers(id) on delete set null, -- クラブモードで事前登録した顧客への参照（バーモードでは常にnull）
   memo            text not null default '',
   payment_method  text check (payment_method in ('cash','card','paypay','other_epayment')),
   guest_count     integer,                             -- 人数（任意）
@@ -249,6 +269,7 @@ alter table organization_members enable row level security;
 alter table stores        enable row level security;
 alter table store_members enable row level security;
 alter table staff         enable row level security;
+alter table customers     enable row level security;
 alter table menu_items    enable row level security;
 alter table tabs          enable row level security;
 alter table tab_items     enable row level security;
@@ -306,6 +327,12 @@ create policy "store members can access their staff"
 
 create policy "org members can view their organization's staff"
   on staff for select using (store_id in (select my_org_store_ids()));
+
+create policy "store members can access their customers"
+  on customers for all using (store_id in (select my_store_ids()));
+
+create policy "org members can view their organization's customers"
+  on customers for select using (store_id in (select my_org_store_ids()));
 
 create policy "store members can access their menu"
   on menu_items for all using (store_id in (select my_store_ids()));
@@ -392,6 +419,7 @@ create policy "authenticated users can delete their receipts"
 create index if not exists idx_store_members_user_id on store_members(user_id);
 
 create index if not exists idx_staff_store_id on staff(store_id);
+create index if not exists idx_customers_store_id on customers(store_id);
 create index if not exists idx_menu_items_store_id on menu_items(store_id);
 
 create index if not exists idx_tabs_store_business_date on tabs(store_id, business_date);

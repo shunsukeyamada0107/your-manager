@@ -8,6 +8,7 @@ import {
   tabDiscountAmount,
   tabTax,
   tabTotal,
+  customerStats,
   businessDateFor,
   attHours,
   dayLaborCost,
@@ -43,6 +44,7 @@ function tab(overrides: Partial<TabWithItems> = {}): TabWithItems {
     store_id: "store-1",
     business_date: "2026-07-01",
     name: "テスト卓",
+    customer_id: null,
     memo: "",
     payment_method: "cash",
     guest_count: null,
@@ -502,5 +504,42 @@ describe("hexToRgbTriplet", () => {
   it("falls back to the default gold for invalid input", () => {
     expect(hexToRgbTriplet("not-a-color")).toBe("212 175 106");
     expect(hexToRgbTriplet("#fff")).toBe("212 175 106");
+  });
+});
+
+describe("customerStats", () => {
+  it("only counts closed tabs toward visitCount and totalSales", () => {
+    const tabs: TabWithItems[] = [
+      tab({ tab_items: [item({ price: 1000, qty: 3 })] }), // closed, total 3300
+      tab({ closed_at: null, tab_items: [item({ price: 5000, qty: 1 })] }), // 未会計、除外される
+    ];
+    const stats = customerStats(tabs, 0.1);
+    expect(stats.visitCount).toBe(1);
+    expect(stats.totalSales).toBe(tabTotal(tabs[0].tab_items, 0.1, null, null));
+  });
+
+  it("sums totalSales across multiple closed tabs, including discounts", () => {
+    const tabs: TabWithItems[] = [
+      tab({ tab_items: [item({ price: 1000, qty: 3 })] }), // total 3300
+      tab({ discount_percent: 30, tab_items: [item({ price: 2000, qty: 1 })] }), // 2200 - 30% = 1540 → 切り上げ1600
+    ];
+    const stats = customerStats(tabs, 0.1);
+    expect(stats.visitCount).toBe(2);
+    expect(stats.totalSales).toBe(
+      tabTotal(tabs[0].tab_items, 0.1, null, null) + tabTotal(tabs[1].tab_items, 0.1, 30, null)
+    );
+  });
+
+  it("returns the latest business_date among closed tabs as lastVisitDate", () => {
+    const tabs: TabWithItems[] = [
+      tab({ business_date: "2026-07-01" }),
+      tab({ business_date: "2026-07-15" }),
+      tab({ business_date: "2026-07-10" }),
+    ];
+    expect(customerStats(tabs).lastVisitDate).toBe("2026-07-15");
+  });
+
+  it("returns zeros/null for an empty tab list", () => {
+    expect(customerStats([])).toEqual({ visitCount: 0, totalSales: 0, lastVisitDate: null });
   });
 });

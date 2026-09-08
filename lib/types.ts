@@ -18,6 +18,20 @@ export type Staff = {
   commission_rate_override: number | null; // commission_basis='own_tabs'の人の歩合率を店舗設定と別に指定する場合の上書き値。null=店舗設定のcommission_rateに従う
 };
 
+export type Customer = {
+  id: string;
+  store_id: string;
+  name: string;
+  name_kana: string | null; // フリガナ（カナ検索用）
+  phone: string | null;
+  birthday: string | null; // date (YYYY-MM-DD)
+  primary_staff_id: string | null; // 担当キャスト・指名
+  bottle_keep: string | null; // ボトルキープの棚番号・銘柄など
+  memo: string;
+  active: boolean;
+  created_at: string;
+};
+
 export type MenuItem = {
   id: string;
   store_id: string;
@@ -64,6 +78,7 @@ export type Tab = {
   store_id: string;
   business_date: string;
   name: string;
+  customer_id: string | null; // クラブモードで紐付けた顧客（バーモードでは常にnull）
   memo: string;
   payment_method: PaymentMethod | null;
   guest_count: number | null;
@@ -152,6 +167,8 @@ export const DEFAULT_DRINK_BACK_AMOUNT = 200;
 export type CommissionScheme = "simple" | "drink_back";
 
 export type PayCycle = "monthly" | "weekly" | "daily";
+
+export type StoreMode = "bar" | "club"; // 店舗の運用モード。club=クラブモード（顧客の事前登録必須）
 
 export function itemSubtotal(item: Pick<TabItem, "price" | "qty">) {
   return item.price * item.qty;
@@ -530,4 +547,27 @@ export function daySummary(
     card,
     unsettled,
   };
+}
+
+export type CustomerStats = {
+  visitCount: number; // 来店回数（closed_atがある伝票の数）
+  totalSales: number; // 累計売上（tabTotalの合計）
+  lastVisitDate: string | null; // 最終来店日（business_dateの最大値）
+};
+
+// 顧客ごとの来店回数・累計売上・最終来店日を、その顧客に紐づく会計済み（closed_atがある）伝票から計算する。
+// customersテーブルには保存せず、設定タブの顧客管理セクションで都度この関数を呼んで表示する。
+// 呼び出し側であらかじめcustomer_idで絞り込んだtabsを渡す想定。
+export function customerStats(tabs: TabWithItems[], taxRate: number = DEFAULT_TAX_RATE): CustomerStats {
+  const closed = tabs.filter((t) => t.closed_at);
+  const visitCount = closed.length;
+  const totalSales = closed.reduce(
+    (a, t) => a + tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount),
+    0
+  );
+  const lastVisitDate = closed.reduce<string | null>(
+    (latest, t) => (latest === null || t.business_date > latest ? t.business_date : latest),
+    null
+  );
+  return { visitCount, totalSales, lastVisitDate };
 }
