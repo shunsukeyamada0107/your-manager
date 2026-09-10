@@ -10,7 +10,6 @@ import {
   MenuItem,
   Staff,
   Customer,
-  CustomerStats,
   CustomerStaffCommissionRule,
   CommissionMode,
   SlideScaleTier,
@@ -29,7 +28,6 @@ import {
   commissionTaxBasisResolver,
   totalSalesCommissionStaff,
   commissionRateResolver,
-  customerStats,
   attendanceWorkedSet,
   primaryCustomerOwnerResolver,
   primaryCustomerSalesBreakdown,
@@ -149,29 +147,6 @@ export default function SettingsPage() {
   } = useStore();
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  type CustomerDraft = {
-    name: string;
-    nameKana: string;
-    phone: string;
-    birthday: string;
-    primaryStaffId: string; // "" = 未設定
-    bottleKeep: string;
-    memo: string;
-  };
-  const [customerDrafts, setCustomerDrafts] = useState<Record<string, CustomerDraft>>({});
-  const [customerStatsById, setCustomerStatsById] = useState<Record<string, CustomerStats>>({});
-  const [newCustomerName, setNewCustomerName] = useState("");
-  const [newCustomerKana, setNewCustomerKana] = useState("");
-
-  // 顧客ごとの指名歩合ルール（誰の売上が、誰の歩合にいくら入るか）
-  const [customerRules, setCustomerRules] = useState<Record<string, CustomerStaffCommissionRule[]>>({});
-  const [customerRuleOpenIds, setCustomerRuleOpenIds] = useState<Set<string>>(new Set());
-  type NewRuleDraft = { staffId: string; rate: string; dayOffRate: string; note: string };
-  const emptyNewRuleDraft: NewRuleDraft = { staffId: "", rate: "", dayOffRate: "0", note: "" };
-  const [newRuleDrafts, setNewRuleDrafts] = useState<Record<string, NewRuleDraft>>({});
-  type RuleDraft = { rate: string; dayOffRate: string; note: string };
-  const [ruleDrafts, setRuleDrafts] = useState<Record<string, RuleDraft>>({});
 
   // スタッフの「担当客を丸ごと自分の歩合にする」設定（固定歩合／月間スライド歩合）
   const [primaryCustomerOpenIds, setPrimaryCustomerOpenIds] = useState<Set<string>>(new Set());
@@ -401,78 +376,7 @@ export default function SettingsPage() {
       .order("created_at", { ascending: false })
       .limit(100);
     setTabLogs((tabLogsData as TabLog[]) ?? []);
-
-    // クラブモードの店舗でのみ顧客一覧・来店統計を読み込む（バーモードでは何もしない）
-    if (storeMode === "club") {
-      const { data: customersData } = await supabase
-        .from("customers")
-        .select("*")
-        .eq("store_id", storeId)
-        .eq("active", true)
-        .order("created_at", { ascending: true });
-      setCustomers((customersData as Customer[]) ?? []);
-      setCustomerDrafts(
-        Object.fromEntries(
-          ((customersData as Customer[]) ?? []).map((c) => [
-            c.id,
-            {
-              name: c.name,
-              nameKana: c.name_kana ?? "",
-              phone: c.phone ?? "",
-              birthday: c.birthday ?? "",
-              primaryStaffId: c.primary_staff_id ?? "",
-              bottleKeep: c.bottle_keep ?? "",
-              memo: c.memo,
-            },
-          ])
-        )
-      );
-
-      // 来店回数・累計売上・最終来店日は保存せず、customer_idで絞ったtabsから都度計算する
-      const { data: customerTabsData } = await supabase
-        .from("tabs")
-        .select("*, tab_items(*)")
-        .eq("store_id", storeId)
-        .not("customer_id", "is", null);
-      const tabsByCustomer: Record<string, TabWithItems[]> = {};
-      ((customerTabsData as TabWithItems[]) ?? []).forEach((t) => {
-        if (!t.customer_id) return;
-        (tabsByCustomer[t.customer_id] ??= []).push(t);
-      });
-      setCustomerStatsById(
-        Object.fromEntries(
-          ((customersData as Customer[]) ?? []).map((c) => [c.id, customerStats(tabsByCustomer[c.id] ?? [], taxRate)])
-        )
-      );
-
-      // 顧客ごとの指名歩合ルール（誰の売上が、誰の歩合にいくら入るか）
-      const { data: rulesData } = await supabase
-        .from("customer_staff_commission_rules")
-        .select("*")
-        .eq("store_id", storeId);
-      const rulesByCustomer: Record<string, CustomerStaffCommissionRule[]> = {};
-      ((rulesData as CustomerStaffCommissionRule[]) ?? []).forEach((r) => {
-        (rulesByCustomer[r.customer_id] ??= []).push(r);
-      });
-      setCustomerRules(rulesByCustomer);
-      setRuleDrafts(
-        Object.fromEntries(
-          ((rulesData as CustomerStaffCommissionRule[]) ?? []).map((r) => [
-            r.id,
-            {
-              rate: String(Math.round(r.rate * 100)),
-              dayOffRate: String(Math.round(r.day_off_rate * 100)),
-              note: r.note ?? "",
-            },
-          ])
-        )
-      );
-    } else {
-      setCustomers([]);
-      setCustomerStatsById({});
-      setCustomerRules({});
-    }
-  }, [storeId, storeMode, taxRate]);
+  }, [storeId]);
 
   useEffect(() => {
     loadData();
@@ -901,85 +805,6 @@ export default function SettingsPage() {
     loadData();
   }
 
-  async function addCustomer() {
-    if (!storeId || !newCustomerName.trim()) return;
-    await supabase.from("customers").insert({
-      store_id: storeId,
-      name: newCustomerName.trim(),
-      name_kana: newCustomerKana.trim() || null,
-    });
-    setNewCustomerName("");
-    setNewCustomerKana("");
-    loadData();
-  }
-
-  async function removeCustomer(id: string) {
-    await supabase.from("customers").update({ active: false }).eq("id", id);
-    loadData();
-  }
-
-  async function saveCustomerRow(id: string) {
-    const d = customerDrafts[id];
-    if (!d || !d.name.trim()) return;
-    await supabase
-      .from("customers")
-      .update({
-        name: d.name.trim(),
-        name_kana: d.nameKana.trim() || null,
-        phone: d.phone.trim() || null,
-        birthday: d.birthday || null,
-        primary_staff_id: d.primaryStaffId || null,
-        bottle_keep: d.bottleKeep.trim() || null,
-        memo: d.memo,
-      })
-      .eq("id", id);
-    loadData();
-  }
-
-  function toggleCustomerRuleOpen(customerId: string) {
-    setCustomerRuleOpenIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(customerId)) next.delete(customerId);
-      else next.add(customerId);
-      return next;
-    });
-  }
-
-  async function addCustomerRule(customerId: string) {
-    if (!storeId) return;
-    const d = newRuleDrafts[customerId] ?? emptyNewRuleDraft;
-    if (!d.staffId || d.rate.trim() === "") return;
-    await supabase.from("customer_staff_commission_rules").insert({
-      store_id: storeId,
-      customer_id: customerId,
-      staff_id: d.staffId,
-      rate: Number(d.rate) / 100,
-      day_off_rate: d.dayOffRate.trim() === "" ? 0 : Number(d.dayOffRate) / 100,
-      note: d.note.trim() || null,
-    });
-    setNewRuleDrafts((m) => ({ ...m, [customerId]: emptyNewRuleDraft }));
-    loadData();
-  }
-
-  async function saveCustomerRuleRow(ruleId: string) {
-    const d = ruleDrafts[ruleId];
-    if (!d) return;
-    await supabase
-      .from("customer_staff_commission_rules")
-      .update({
-        rate: Number(d.rate) / 100,
-        day_off_rate: d.dayOffRate.trim() === "" ? 0 : Number(d.dayOffRate) / 100,
-        note: d.note.trim() || null,
-      })
-      .eq("id", ruleId);
-    loadData();
-  }
-
-  async function removeCustomerRule(ruleId: string) {
-    await supabase.from("customer_staff_commission_rules").delete().eq("id", ruleId);
-    loadData();
-  }
-
   function togglePrimaryCustomerOpen(staffId: string) {
     setPrimaryCustomerOpenIds((prev) => {
       const next = new Set(prev);
@@ -1376,207 +1201,6 @@ export default function SettingsPage() {
     );
   }
 
-  function renderCustomerRow(c: Customer) {
-    const d = customerDrafts[c.id] ?? {
-      name: c.name,
-      nameKana: c.name_kana ?? "",
-      phone: c.phone ?? "",
-      birthday: c.birthday ?? "",
-      primaryStaffId: c.primary_staff_id ?? "",
-      bottleKeep: c.bottle_keep ?? "",
-      memo: c.memo,
-    };
-    const stats = customerStatsById[c.id];
-    return (
-      <div key={c.id} className="px-3 py-2 space-y-2">
-        <div className="flex justify-between items-center gap-2">
-          <input
-            value={d.name}
-            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, name: e.target.value } }))}
-            className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1 text-sm"
-          />
-          <button onClick={() => removeCustomer(c.id)} className="text-rose text-xs shrink-0">
-            削除
-          </button>
-        </div>
-        <div className="flex gap-2 flex-wrap">
-          <input
-            value={d.nameKana}
-            placeholder="フリガナ"
-            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, nameKana: e.target.value } }))}
-            className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-          />
-          <input
-            value={d.phone}
-            placeholder="電話番号"
-            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, phone: e.target.value } }))}
-            className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-          />
-          <input
-            type="date"
-            value={d.birthday}
-            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, birthday: e.target.value } }))}
-            className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-          />
-          <select
-            value={d.primaryStaffId}
-            onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, primaryStaffId: e.target.value } }))}
-            className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-          >
-            <option value="">担当キャスト未設定</option>
-            {staff.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <input
-          value={d.bottleKeep}
-          placeholder="ボトルキープ（棚番号・銘柄など）"
-          onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, bottleKeep: e.target.value } }))}
-          className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-        />
-        <textarea
-          value={d.memo}
-          placeholder="メモ"
-          rows={2}
-          onChange={(e) => setCustomerDrafts((m) => ({ ...m, [c.id]: { ...d, memo: e.target.value } }))}
-          className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-        />
-        {stats && (
-          <div className="text-xs text-gray-500">
-            来店 {stats.visitCount}回 ・ 累計 ¥{stats.totalSales.toLocaleString()} ・ 最終来店{" "}
-            {stats.lastVisitDate ?? "-"}
-          </div>
-        )}
-        <button
-          onClick={() => saveCustomerRow(c.id)}
-          className="text-xs rounded-md border border-line px-2 py-1 text-gray-300"
-        >
-          保存
-        </button>
-
-        {renderCustomerRulePanel(c)}
-      </div>
-    );
-  }
-
-  function renderCustomerRulePanel(c: Customer) {
-    const open = customerRuleOpenIds.has(c.id);
-    const rules = customerRules[c.id] ?? [];
-    const newDraft = newRuleDrafts[c.id] ?? emptyNewRuleDraft;
-
-    return (
-      <div>
-        <button
-          onClick={() => toggleCustomerRuleOpen(c.id)}
-          className={`text-xs rounded-md border px-2 py-1 ${
-            rules.length > 0 ? "border-gold text-gold bg-gold/10" : "border-line text-gray-500"
-          }`}
-        >
-          指名歩合ルール{rules.length > 0 ? `：${rules.length}件` : "を追加"}
-          {open ? " ▲" : " ▼"}
-        </button>
-
-        {open && (
-          <div className="mt-2 rounded-md border border-line bg-elevated p-2.5 space-y-2">
-            <div className="text-xs text-gray-500">
-              この顧客の売上について、実際に接客したスタッフとは別に、指定したスタッフへ上乗せの歩合を付けます。
-            </div>
-            {rules.map((r) => {
-              const rd = ruleDrafts[r.id] ?? { rate: String(Math.round(r.rate * 100)), dayOffRate: String(Math.round(r.day_off_rate * 100)), note: r.note ?? "" };
-              const staffName = staff.find((s) => s.id === r.staff_id)?.name ?? "(元スタッフ)";
-              return (
-                <div key={r.id} className="rounded-md border border-line p-2 space-y-1.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-gray-300">{staffName}</span>
-                    <button onClick={() => removeCustomerRule(r.id)} className="text-rose text-xs shrink-0">
-                      削除
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <input
-                      value={rd.rate}
-                      onChange={(e) => setRuleDrafts((m) => ({ ...m, [r.id]: { ...rd, rate: e.target.value } }))}
-                      placeholder="通常時の率(%)"
-                      inputMode="numeric"
-                      className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-                    />
-                    <input
-                      value={rd.dayOffRate}
-                      onChange={(e) => setRuleDrafts((m) => ({ ...m, [r.id]: { ...rd, dayOffRate: e.target.value } }))}
-                      placeholder="休みの日の率(%)"
-                      inputMode="numeric"
-                      className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-                    />
-                  </div>
-                  <input
-                    value={rd.note}
-                    onChange={(e) => setRuleDrafts((m) => ({ ...m, [r.id]: { ...rd, note: e.target.value } }))}
-                    placeholder="メモ（任意。例：半分×42%）"
-                    className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-                  />
-                  <button
-                    onClick={() => saveCustomerRuleRow(r.id)}
-                    className="text-xs rounded-md border border-line px-2 py-1 text-gray-300"
-                  >
-                    保存
-                  </button>
-                </div>
-              );
-            })}
-
-            <div className="rounded-md border border-dashed border-line p-2 space-y-1.5">
-              <select
-                value={newDraft.staffId}
-                onChange={(e) => setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, staffId: e.target.value } }))}
-                className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-              >
-                <option value="">歩合を受け取るスタッフ</option>
-                {staff.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-              <div className="flex items-center gap-2 flex-wrap">
-                <input
-                  value={newDraft.rate}
-                  onChange={(e) => setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, rate: e.target.value } }))}
-                  placeholder="通常時の率(%)"
-                  inputMode="numeric"
-                  className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-                />
-                <input
-                  value={newDraft.dayOffRate}
-                  onChange={(e) =>
-                    setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, dayOffRate: e.target.value } }))
-                  }
-                  placeholder="休みの日の率(%)"
-                  inputMode="numeric"
-                  className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-                />
-              </div>
-              <input
-                value={newDraft.note}
-                onChange={(e) => setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, note: e.target.value } }))}
-                placeholder="メモ（任意）"
-                className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
-              />
-              <button
-                onClick={() => addCustomerRule(c.id)}
-                className="rounded-md px-3 py-1.5 text-xs border border-dashed border-gold text-gold"
-              >
-                ＋ ルールを追加
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <OwnerPinGate
       storeId={storeId}
@@ -1814,7 +1438,7 @@ export default function SettingsPage() {
               </button>
             </div>
             <div className="text-xs text-gray-500 mt-1">
-              「クラブ」にすると、伝票作成時に登録済みの顧客を選ぶことが必須になり、下に「顧客管理」セクションが表示されます。
+              「クラブ」にすると、伝票作成時に登録済みの顧客を選ぶことが必須になり、下のタブに「顧客」が表示されます。
             </div>
           </div>
           <div>
@@ -2215,41 +1839,6 @@ export default function SettingsPage() {
           </button>
         </div>
       </div>
-
-      {storeMode === "club" && (
-        <div className="rounded-xl border border-line p-4">
-          <SectionHeader icon={<PeopleSectionIcon />}>顧客管理</SectionHeader>
-          {customers.length === 0 ? (
-            <div className="rounded-xl border border-line bg-elevated">
-              <div className="text-sm text-gray-500 text-center py-6">顧客が未登録です</div>
-            </div>
-          ) : (
-            <div className="rounded-xl border border-line bg-elevated divide-y divide-line">
-              {customers.map(renderCustomerRow)}
-            </div>
-          )}
-          <div className="mt-2 rounded-xl border border-dashed border-line p-3 flex gap-2">
-            <input
-              value={newCustomerName}
-              onChange={(e) => setNewCustomerName(e.target.value)}
-              placeholder="顧客名"
-              className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
-            />
-            <input
-              value={newCustomerKana}
-              onChange={(e) => setNewCustomerKana(e.target.value)}
-              placeholder="フリガナ(任意)"
-              className="w-28 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
-            />
-            <button
-              onClick={addCustomer}
-              className="rounded-md px-3 py-1.5 text-sm border border-dashed border-gold text-gold shrink-0"
-            >
-              ＋ 追加
-            </button>
-          </div>
-        </div>
-      )}
 
       <div className="rounded-xl border border-line p-4">
         <SectionHeader icon={<ListSectionIcon />}>伝票ログ（作成・削除の履歴）</SectionHeader>
