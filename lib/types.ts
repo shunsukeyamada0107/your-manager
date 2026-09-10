@@ -16,6 +16,13 @@ export type Staff = {
   commission_basis: CommissionBasis; // 歩合の対象範囲。own_tabs=自分が担当した伝票の売上（通常）、total_sales=店舗全体の売上
   total_sales_commission_rate: number | null; // commission_basis='total_sales'の場合に使う、その人専用の歩合率
   commission_rate_override: number | null; // commission_basis='own_tabs'の人の歩合率を店舗設定と別に指定する場合の上書き値。null=店舗設定のcommission_rateに従う
+  commission_mode: CommissionMode; // standard=通常の按分歩合のみ。primary_customer_flat/primary_customer_slide=担当客の伝票を丸ごと自分の歩合にする
+  primary_customer_rate: number | null; // commission_mode='primary_customer_flat'用の固定歩合率
+  primary_customer_day_off_rate: number | null; // commission_mode='primary_customer_slide'用、本人が出勤していない日の担当客売上に適用する固定率
+  commission_start_date: string | null; // 歩合のみのスタッフとしての起算日（date）。保証額アップ対象月数の判定に使う
+  primary_customer_guarantee_amount: number | null; // primary_customer_slide用の月間保証額
+  primary_customer_guarantee_startup_rate: number | null; // 起算から一定月数だけ保証額に上乗せする率
+  primary_customer_guarantee_startup_months: number | null; // 上記の上乗せが適用される月数
 };
 
 export type Customer = {
@@ -322,6 +329,27 @@ export function commissionRateResolver(staffList: Staff[], storeDefault: number)
 export type CommissionBasis = "own_tabs" | "total_sales";
 export const DEFAULT_COMMISSION_BASIS: CommissionBasis = "own_tabs";
 
+// 担当客（customers.primary_staff_id）の売上を丸ごと自分の歩合にするかどうか。standard=しない（通常の按分歩合のみ）。
+// primary_customer_flat=固定率で丸ごと帰属。primary_customer_slide=出勤日分は月間スライド歩合、非出勤日分は別建ての固定率
+export type CommissionMode = "standard" | "primary_customer_flat" | "primary_customer_slide";
+export const DEFAULT_COMMISSION_MODE: CommissionMode = "standard";
+
+// 顧客ごとの指名歩合ルール（実際の接客者とは別のスタッフに、その顧客の売上の一部を加算する）
+export type CustomerStaffCommissionRule = {
+  id: string;
+  store_id: string;
+  customer_id: string;
+  staff_id: string; // 歩合を受け取るスタッフ
+  rate: number; // 通常時（そのスタッフがその伝票の営業日に出勤している場合）の歩合率
+  day_off_rate: number; // 本人がその営業日に出勤していない場合の歩合率
+  note: string | null;
+  created_at: string;
+};
+
+// 月間個人売上に対する非マージナル方式のスライド歩合ティア（該当する最大閾値の率を1つだけ適用する）
+export type SlideScaleTier = { minAmount: number; rate: number };
+export const DEFAULT_SLIDE_SCALE_TIERS: SlideScaleTier[] = [];
+
 // commission_basis='total_sales'のスタッフだけを、専用の歩合率つきで抽出する
 export function totalSalesCommissionStaff(staffList: Staff[]): Array<{ staffId: string; rate: number }> {
   return staffList
@@ -356,6 +384,12 @@ export function totalSalesCommissionStaff(staffList: Staff[]): Array<{ staffId: 
 //
 // commissionRateFor: own_tabsの人（simpleの一律%、drink_backの売上バック部分）の歩合率を、店舗設定の
 //   commissionRateと別に個人ごとに指定したい場合のコールバック（未設定ならcommissionRateをそのまま使う）。
+//
+// primaryCustomerOwnerOf: 伝票の顧客(tabs.customer_id)が、誰かの「担当客を丸ごと自分の歩合にする」設定
+//   （staff.commission_mode='primary_customer_flat'/'primary_customer_slide'）の対象になっている場合、
+//   そのスタッフのidを返すコールバック（対象でなければnull）。対象の伝票は、実際の担当（tabs.staff_id/
+//   tab_items.staff_id）が誰であっても、この関数の通常の按分・total_sales集計からは完全に除外する
+//   （二重計上を避けるため。除外された分の実際の歩合額は、この関数の外＝専用の別関数で計算する）。
 export function staffCommissionBreakdown(
   tabs: TabWithItems[],
   staffNameOf: (staffId: string | null) => string,
@@ -366,7 +400,8 @@ export function staffCommissionBreakdown(
   isCommissionEligible: (staffId: string) => boolean = () => true,
   taxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
   totalSalesStaff: Array<{ staffId: string; rate: number }> = [],
-  commissionRateFor: (staffId: string) => number = () => commissionRate
+  commissionRateFor: (staffId: string) => number = () => commissionRate,
+  primaryCustomerOwnerOf: (customerId: string | null) => string | null = () => null
 ): StaffCommission[] {
   const map: Record<string, StaffCommission> = {};
   const totalSalesStaffIds = new Set(totalSalesStaff.map((s) => s.staffId));
@@ -385,6 +420,8 @@ export function staffCommissionBreakdown(
 
   tabs.forEach((t) => {
     if (!t.closed_at) return;
+    // 担当客を丸ごと自分の歩合にする設定の対象伝票は、実際の担当が誰でも通常の按分から完全に除外する
+    if (t.customer_id && primaryCustomerOwnerOf(t.customer_id)) return;
     const sub = tabSubtotal(t.tab_items);
     if (sub <= 0) return;
 
@@ -498,7 +535,8 @@ export function daySummary(
   isCommissionEligible: (staffId: string) => boolean = () => true,
   commissionTaxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
   totalSalesStaff: Array<{ staffId: string; rate: number }> = [],
-  commissionRateFor: (staffId: string) => number = () => commissionRate
+  commissionRateFor: (staffId: string) => number = () => commissionRate,
+  primaryCustomerOwnerOf: (customerId: string | null) => string | null = () => null
 ): DaySummary {
   const subtotal = tabs.reduce((a, t) => a + tabSubtotal(t.tab_items), 0);
   const tax = tabs.reduce((a, t) => a + tabTax(t.tab_items, taxRate), 0);
@@ -513,7 +551,8 @@ export function daySummary(
     isCommissionEligible,
     commissionTaxBasisFor,
     totalSalesStaff,
-    commissionRateFor
+    commissionRateFor,
+    primaryCustomerOwnerOf
   ).reduce(
     (a, c) => a + c.commission,
     0
@@ -570,4 +609,158 @@ export function customerStats(tabs: TabWithItems[], taxRate: number = DEFAULT_TA
     null
   );
   return { visitCount, totalSales, lastVisitDate };
+}
+
+// staff_id:business_date の組を1回だけSetにしておき、O(1)で「その日出勤していたか」を判定できるようにする
+// （hourlyLaborBreakdownと同じく、出退勤配列を毎回スキャンし直さない）
+export function attendanceWorkedSet(attendance: Attendance[]): Set<string> {
+  return new Set(attendance.map((a) => `${a.staff_id}:${a.business_date}`));
+}
+
+export function didWorkOn(workedSet: Set<string>, staffId: string, businessDate: string): boolean {
+  return workedSet.has(`${staffId}:${businessDate}`);
+}
+
+// customers.primary_staff_idが、「担当客を丸ごと自分の歩合にする」設定（commission_mode !== 'standard'）を
+// 有効にしているスタッフを指している場合だけ、customer_id -> staff_id の解決関数を返す
+// （無効なスタッフを指している・primary_staff_id未設定の顧客はnull＝通常どおりの按分歩合のまま）
+export function primaryCustomerOwnerResolver(
+  customers: Customer[],
+  staffList: Staff[]
+): (customerId: string | null) => string | null {
+  const opted = new Set(staffList.filter((s) => s.commission_mode !== "standard").map((s) => s.id));
+  const map: Record<string, string> = {};
+  customers.forEach((c) => {
+    if (c.primary_staff_id && opted.has(c.primary_staff_id)) map[c.id] = c.primary_staff_id;
+  });
+  return (customerId) => (customerId ? map[customerId] ?? null : null);
+}
+
+export type PrimaryCustomerSales = { staffId: string; name: string; workedSales: number; offDaySales: number };
+
+// primaryCustomerOwnerResolver()で除外対象となった伝票の実会計額（tabTotal）を、オーナースタッフごとに
+// 「本人がその営業日に出勤していた分」「出勤していなかった分」に振り分けて集計する。
+// これは歩合そのものではなく、後段（固定率 or 月間スライド歩合）が使う元の売上額
+export function primaryCustomerSalesBreakdown(
+  tabs: TabWithItems[],
+  staffNameOf: (staffId: string | null) => string,
+  ownerOf: (customerId: string | null) => string | null,
+  workedSet: Set<string>,
+  taxRate: number = DEFAULT_TAX_RATE
+): PrimaryCustomerSales[] {
+  const map: Record<string, PrimaryCustomerSales> = {};
+  tabs.forEach((t) => {
+    if (!t.closed_at || !t.customer_id) return;
+    const ownerId = ownerOf(t.customer_id);
+    if (!ownerId) return;
+    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    if (!map[ownerId]) {
+      map[ownerId] = { staffId: ownerId, name: staffNameOf(ownerId), workedSales: 0, offDaySales: 0 };
+    }
+    if (didWorkOn(workedSet, ownerId, t.business_date)) map[ownerId].workedSales += amount;
+    else map[ownerId].offDaySales += amount;
+  });
+  return Object.values(map);
+}
+
+// 非マージナル方式のスライド歩合率を返す：月間合計以上の最大min_amountを持つティアの率を1つだけ選ぶ
+// （段階的な累進課税のような按分はしない。閾値未満の売上しかなければ0）
+export function slideScaleRate(tiers: SlideScaleTier[], monthlyAmount: number): number {
+  let rate = 0;
+  [...tiers]
+    .sort((a, b) => a.minAmount - b.minAmount)
+    .forEach((t) => {
+      if (monthlyAmount >= t.minAmount) rate = t.rate;
+    });
+  return rate;
+}
+
+// commissionStartDate（歩合制としての起算日、"YYYY-MM-DD"）から見て、periodYearMonth（"YYYY-MM"）が
+// 何ヶ月目にあたるかを返す（起算月そのものが1ヶ月目）
+export function commissionMonthNumber(commissionStartDate: string, periodYearMonth: string): number {
+  const [sy, sm] = commissionStartDate.slice(0, 7).split("-").map(Number);
+  const [py, pm] = periodYearMonth.split("-").map(Number);
+  return (py - sy) * 12 + (pm - sm) + 1;
+}
+
+export type SlideScaleCommissionInput = {
+  workedSales: number; // その月・出勤日分の本人の担当客売上（primaryCustomerSalesBreakdownのworkedSales）
+  tiers: SlideScaleTier[];
+  guaranteeAmount: number;
+  guaranteeStartupRate: number;
+  guaranteeStartupMonths: number;
+  monthNumber: number; // commissionMonthNumber()の結果
+};
+
+// max(スライド歩合, 保証額)を返す。起算からguaranteeStartupMonthsヶ月目までは、保証額に
+// 「workedSales × guaranteeStartupRate」を上乗せしてから比較する（それ以降は保証額そのまま）
+export function slideScaleCommission(input: SlideScaleCommissionInput): number {
+  const slideAmount = input.workedSales * slideScaleRate(input.tiers, input.workedSales);
+  const guaranteeBase =
+    input.monthNumber <= input.guaranteeStartupMonths
+      ? input.guaranteeAmount + input.workedSales * input.guaranteeStartupRate
+      : input.guaranteeAmount;
+  return Math.max(slideAmount, guaranteeBase);
+}
+
+// 指名歩合（加算方式）：実際に接客したスタッフとは別のスタッフに、特定の顧客の売上の一部を追加の歩合として渡す。
+// 客の実会計額(tabTotal)に、その客に対するルールのrate（受け取るスタッフが出勤している日）/
+// day_off_rate（出勤していない日）を掛けてスタッフごとに合算する。
+// 同一スタッフが複数の客のルールを持っていても、mapへの加算で自然に合算される
+export function namedCustomerCommission(
+  tabs: TabWithItems[],
+  rules: CustomerStaffCommissionRule[],
+  staffNameOf: (staffId: string | null) => string,
+  workedSet: Set<string>,
+  taxRate: number = DEFAULT_TAX_RATE
+): StaffCommission[] {
+  const rulesByCustomer: Record<string, CustomerStaffCommissionRule[]> = {};
+  rules.forEach((r) => {
+    (rulesByCustomer[r.customer_id] ??= []).push(r);
+  });
+
+  const map: Record<string, StaffCommission> = {};
+  tabs.forEach((t) => {
+    if (!t.closed_at || !t.customer_id) return;
+    const matching = rulesByCustomer[t.customer_id];
+    if (!matching?.length) return;
+    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    matching.forEach((rule) => {
+      const rate = didWorkOn(workedSet, rule.staff_id, t.business_date) ? rule.rate : rule.day_off_rate;
+      if (!map[rule.staff_id]) {
+        map[rule.staff_id] = {
+          staffId: rule.staff_id,
+          name: staffNameOf(rule.staff_id),
+          salesExTax: 0,
+          salesWithTax: 0,
+          drinkCount: 0,
+          drinkBack: 0,
+          salesBack: 0,
+          commission: 0,
+        };
+      }
+      map[rule.staff_id].salesWithTax += amount;
+      map[rule.staff_id].commission += amount * rate;
+    });
+  });
+  return Object.values(map);
+}
+
+// 複数の内訳（通常按分 + 指名歩合 + 担当客の固定/スライド歩合など）をstaffIdで合算して1つの表示用配列にする
+export function mergeStaffCommissions(...groups: StaffCommission[][]): StaffCommission[] {
+  const map: Record<string, StaffCommission> = {};
+  groups.flat().forEach((c) => {
+    if (!c.staffId) return;
+    if (!map[c.staffId]) {
+      map[c.staffId] = { ...c };
+    } else {
+      map[c.staffId].salesExTax += c.salesExTax;
+      map[c.staffId].salesWithTax += c.salesWithTax;
+      map[c.staffId].drinkCount += c.drinkCount;
+      map[c.staffId].drinkBack += c.drinkBack;
+      map[c.staffId].salesBack += c.salesBack;
+      map[c.staffId].commission += c.commission;
+    }
+  });
+  return Object.values(map).sort((a, b) => b.commission - a.commission);
 }

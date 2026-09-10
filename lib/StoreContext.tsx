@@ -12,6 +12,8 @@ import {
   CommissionTaxBasis,
   PayCycle,
   StoreMode,
+  SlideScaleTier,
+  DEFAULT_SLIDE_SCALE_TIERS,
 } from "@/lib/types";
 import { StoreTheme } from "@/lib/theme";
 
@@ -40,6 +42,7 @@ type StoreContextValue = {
   reportPinRequired: boolean;
   settingsPinRequired: boolean;
   storeMode: StoreMode;
+  slideScaleTiers: SlideScaleTier[];
   loading: boolean;
   reload: () => void;
 };
@@ -69,6 +72,7 @@ const StoreContext = createContext<StoreContextValue>({
   reportPinRequired: false,
   settingsPinRequired: false,
   storeMode: "bar",
+  slideScaleTiers: DEFAULT_SLIDE_SCALE_TIERS,
   loading: true,
   reload: () => {},
 });
@@ -97,6 +101,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [reportPinRequired, setReportPinRequired] = useState(false);
   const [settingsPinRequired, setSettingsPinRequired] = useState(false);
   const [storeMode, setStoreMode] = useState<StoreMode>("bar");
+  const [slideScaleTiers, setSlideScaleTiers] = useState<SlideScaleTier[]>(DEFAULT_SLIDE_SCALE_TIERS);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -113,7 +118,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const { data: member } = await supabase
         .from("store_members")
         .select(
-          "store_id, stores(name, tax_rate, commission_rate, business_day_cutoff_hour, report_template, cash_float_amount, accent_color, commission_scheme, drink_back_amount, theme, show_insights, accepts_card, accepts_paypay, accepts_other_epayment, enable_name_search, name_input_mode, pay_cycle, commission_tax_basis, report_pin_required, settings_pin_required, store_mode)"
+          "store_id, stores(name, tax_rate, commission_rate, business_day_cutoff_hour, report_template, cash_float_amount, accent_color, commission_scheme, drink_back_amount, theme, show_insights, accepts_card, accepts_paypay, accepts_other_epayment, enable_name_search, name_input_mode, pay_cycle, commission_tax_basis, report_pin_required, settings_pin_required, store_mode, slide_scale_tiers)"
         )
         .eq("user_id", userData.user.id)
         .limit(1)
@@ -143,6 +148,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           report_pin_required: boolean | null;
           settings_pin_required: boolean | null;
           store_mode: StoreMode | null;
+          slide_scale_tiers: { min_amount: number; rate: number }[] | null;
         };
         const stores = member.stores as unknown as StoreRow | StoreRow[] | null;
         const store = Array.isArray(stores) ? stores[0] : stores;
@@ -167,6 +173,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setReportPinRequired(store?.report_pin_required ?? false);
         setSettingsPinRequired(store?.settings_pin_required ?? false);
         setStoreMode(store?.store_mode ?? "bar");
+        setSlideScaleTiers(
+          (store?.slide_scale_tiers ?? []).map((t) => ({ minAmount: t.min_amount, rate: t.rate }))
+        );
       }
       setLoading(false);
     }
@@ -198,6 +207,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         reportPinRequired,
         settingsPinRequired,
         storeMode,
+        slideScaleTiers,
         loading,
         reload,
       }}

@@ -17,10 +17,23 @@ import {
   staffCommissionBreakdown,
   daySummary,
   hexToRgbTriplet,
+  SlideScaleTier,
+  attendanceWorkedSet,
+  didWorkOn,
+  primaryCustomerOwnerResolver,
+  primaryCustomerSalesBreakdown,
+  slideScaleRate,
+  commissionMonthNumber,
+  slideScaleCommission,
+  namedCustomerCommission,
+  mergeStaffCommissions,
   TabItem,
   TabWithItems,
   Attendance,
   Expense,
+  Customer,
+  Staff,
+  CustomerStaffCommissionRule,
 } from "./types";
 
 function item(overrides: Partial<TabItem> = {}): TabItem {
@@ -62,6 +75,77 @@ function tab(overrides: Partial<TabWithItems> = {}): TabWithItems {
 }
 
 const staffNameOf = (id: string | null) => (id === "a" ? "Aさん" : id === "b" ? "Bさん" : "未設定");
+
+function customer(overrides: Partial<Customer> = {}): Customer {
+  return {
+    id: overrides.id ?? Math.random().toString(36),
+    store_id: "store-1",
+    name: "テスト客",
+    name_kana: null,
+    phone: null,
+    birthday: null,
+    primary_staff_id: null,
+    bottle_keep: null,
+    memo: "",
+    active: true,
+    created_at: "2026-07-01T00:00:00+09:00",
+    ...overrides,
+  };
+}
+
+function staff(overrides: Partial<Staff> = {}): Staff {
+  return {
+    id: overrides.id ?? Math.random().toString(36),
+    store_id: "store-1",
+    name: "テストスタッフ",
+    hourly_wage: null,
+    active: true,
+    commission_eligible: true,
+    base_salary: null,
+    special_allowance: null,
+    special_wage: null,
+    special_wage_days: null,
+    special_wage_holiday: false,
+    commission_tax_basis_override: null,
+    commission_basis: "own_tabs",
+    total_sales_commission_rate: null,
+    commission_rate_override: null,
+    commission_mode: "standard",
+    primary_customer_rate: null,
+    primary_customer_day_off_rate: null,
+    commission_start_date: null,
+    primary_customer_guarantee_amount: null,
+    primary_customer_guarantee_startup_rate: null,
+    primary_customer_guarantee_startup_months: null,
+    ...overrides,
+  };
+}
+
+function rule(overrides: Partial<CustomerStaffCommissionRule> = {}): CustomerStaffCommissionRule {
+  return {
+    id: overrides.id ?? Math.random().toString(36),
+    store_id: "store-1",
+    customer_id: "customer-1",
+    staff_id: "a",
+    rate: 0.1,
+    day_off_rate: 0,
+    note: null,
+    created_at: "2026-07-01T00:00:00+09:00",
+    ...overrides,
+  };
+}
+
+function attendanceRow(staffId: string, businessDate: string): Attendance {
+  return {
+    id: Math.random().toString(36),
+    store_id: "store-1",
+    staff_id: staffId,
+    business_date: businessDate,
+    clock_in: `${businessDate}T19:00:00+09:00`,
+    clock_out: `${businessDate}T23:00:00+09:00`,
+    wage_snapshot: null,
+  };
+}
 
 describe("roundUpTo100", () => {
   it("rounds up to the nearest 100 yen", () => {
@@ -541,5 +625,219 @@ describe("customerStats", () => {
 
   it("returns zeros/null for an empty tab list", () => {
     expect(customerStats([])).toEqual({ visitCount: 0, totalSales: 0, lastVisitDate: null });
+  });
+});
+
+describe("attendanceWorkedSet / didWorkOn", () => {
+  it("hits for a staff/date pair present in attendance, misses otherwise", () => {
+    const set = attendanceWorkedSet([attendanceRow("a", "2026-07-01"), attendanceRow("b", "2026-07-02")]);
+    expect(didWorkOn(set, "a", "2026-07-01")).toBe(true);
+    expect(didWorkOn(set, "a", "2026-07-02")).toBe(false);
+    expect(didWorkOn(set, "c", "2026-07-01")).toBe(false);
+  });
+});
+
+describe("primaryCustomerOwnerResolver", () => {
+  it("resolves a customer to its primary staff only if that staff opted in (commission_mode !== 'standard')", () => {
+    const customers = [
+      customer({ id: "c1", primary_staff_id: "a" }),
+      customer({ id: "c2", primary_staff_id: "b" }),
+      customer({ id: "c3", primary_staff_id: null }),
+    ];
+    const staffList = [
+      staff({ id: "a", commission_mode: "primary_customer_flat" }),
+      staff({ id: "b", commission_mode: "standard" }),
+    ];
+    const resolve = primaryCustomerOwnerResolver(customers, staffList);
+    expect(resolve("c1")).toBe("a");
+    expect(resolve("c2")).toBeNull();
+    expect(resolve("c3")).toBeNull();
+    expect(resolve(null)).toBeNull();
+  });
+});
+
+describe("staffCommissionBreakdown — primaryCustomerOwnerOf exclusion", () => {
+  it("excludes a primary-customer tab from the substitute server's commission entirely", () => {
+    const excludedTab = tab({
+      customer_id: "c1",
+      staff_id: "b", // 代行スタッフ
+      tab_items: [item({ price: 10000, qty: 1, staff_id: null })],
+    });
+    const ownerOf = (customerId: string | null) => (customerId === "c1" ? "a" : null);
+
+    const withExclusion = staffCommissionBreakdown(
+      [excludedTab], staffNameOf, 0.1, 0.2, "simple", 200,
+      () => true, () => "with_tax", [], () => 0.2, ownerOf
+    );
+    expect(withExclusion.find((c) => c.staffId === "b")).toBeUndefined();
+
+    const withoutExclusion = staffCommissionBreakdown(
+      [excludedTab], staffNameOf, 0.1, 0.2, "simple", 200,
+      () => true, () => "with_tax", [], () => 0.2
+    );
+    expect(withoutExclusion.find((c) => c.staffId === "b")?.commission).toBeGreaterThan(0);
+  });
+
+  it("does not affect tabs without a primary-customer owner (regression check)", () => {
+    const normalTab = tab({ staff_id: "b", tab_items: [item({ price: 10000, qty: 1 })] });
+    const result = staffCommissionBreakdown(
+      [normalTab], staffNameOf, 0.1, 0.2, "simple", 200,
+      () => true, () => "with_tax", [], () => 0.2, () => null
+    );
+    expect(result.find((c) => c.staffId === "b")?.commission).toBeGreaterThan(0);
+  });
+
+  it("excludes the tab from total_sales aggregation too, avoiding double counting", () => {
+    const excludedTab = tab({ customer_id: "c1", staff_id: "b", tab_items: [item({ price: 10000, qty: 1 })] });
+    const ownerOf = (customerId: string | null) => (customerId === "c1" ? "a" : null);
+    const result = staffCommissionBreakdown(
+      [excludedTab], staffNameOf, 0.1, 0.2, "simple", 200,
+      () => true, () => "with_tax",
+      [{ staffId: "x", rate: 0.05 }],
+      () => 0.2, ownerOf
+    );
+    expect(result.find((c) => c.staffId === "x")?.salesWithTax ?? 0).toBe(0);
+  });
+});
+
+describe("primaryCustomerSalesBreakdown", () => {
+  it("splits an owner's tabs into worked-day and off-day sales", () => {
+    const tabs = [
+      tab({ customer_id: "c1", business_date: "2026-07-01", staff_id: "a", tab_items: [item({ price: 10000, qty: 1 })] }),
+      tab({ customer_id: "c1", business_date: "2026-07-02", staff_id: "b", tab_items: [item({ price: 5000, qty: 1 })] }),
+    ];
+    const ownerOf = (customerId: string | null) => (customerId === "c1" ? "a" : null);
+    const workedSet = attendanceWorkedSet([attendanceRow("a", "2026-07-01")]); // aは7/1のみ出勤
+    const result = primaryCustomerSalesBreakdown(tabs, staffNameOf, ownerOf, workedSet, 0.1);
+    const row = result.find((r) => r.staffId === "a")!;
+    expect(row.workedSales).toBe(tabTotal(tabs[0].tab_items, 0.1, null, null));
+    expect(row.offDaySales).toBe(tabTotal(tabs[1].tab_items, 0.1, null, null));
+  });
+});
+
+describe("slideScaleRate", () => {
+  const tiers: SlideScaleTier[] = [
+    { minAmount: 0, rate: 0.2 },
+    { minAmount: 300000, rate: 0.22 },
+    { minAmount: 400000, rate: 0.25 },
+    { minAmount: 500000, rate: 0.27 },
+    { minAmount: 700000, rate: 0.3 },
+  ];
+
+  it("picks the highest matching tier, applied non-marginally", () => {
+    expect(slideScaleRate(tiers, 299999)).toBe(0.2);
+    expect(slideScaleRate(tiers, 300000)).toBe(0.22);
+    expect(slideScaleRate(tiers, 399999)).toBe(0.22);
+    expect(slideScaleRate(tiers, 400000)).toBe(0.25);
+    expect(slideScaleRate(tiers, 500000)).toBe(0.27);
+    expect(slideScaleRate(tiers, 700000)).toBe(0.3);
+    expect(slideScaleRate(tiers, 1000000)).toBe(0.3);
+  });
+
+  it("returns 0 when no tier matches", () => {
+    expect(slideScaleRate([{ minAmount: 300000, rate: 0.22 }], 100000)).toBe(0);
+  });
+});
+
+describe("commissionMonthNumber", () => {
+  it("counts the start month itself as month 1", () => {
+    expect(commissionMonthNumber("2026-06-15", "2026-06")).toBe(1);
+    expect(commissionMonthNumber("2026-06-15", "2026-08")).toBe(3);
+    expect(commissionMonthNumber("2026-06-15", "2026-09")).toBe(4);
+  });
+
+  it("handles a year boundary", () => {
+    expect(commissionMonthNumber("2026-11-01", "2027-02")).toBe(4);
+  });
+});
+
+describe("slideScaleCommission — matches the client's confirmed worked examples", () => {
+  const tiers: SlideScaleTier[] = [
+    { minAmount: 0, rate: 0.2 },
+    { minAmount: 300000, rate: 0.22 },
+    { minAmount: 400000, rate: 0.25 },
+    { minAmount: 500000, rate: 0.27 },
+    { minAmount: 700000, rate: 0.3 },
+  ];
+
+  it("month <=3, 200,000円 sales -> 60,000円 (guarantee+10% beats slide 20%)", () => {
+    const result = slideScaleCommission({
+      workedSales: 200000, tiers, guaranteeAmount: 40000,
+      guaranteeStartupRate: 0.1, guaranteeStartupMonths: 3, monthNumber: 2,
+    });
+    expect(result).toBeCloseTo(60000, 5);
+  });
+
+  it("month <=3, 500,000円 sales -> 135,000円 (slide 27% beats guarantee+10%)", () => {
+    const result = slideScaleCommission({
+      workedSales: 500000, tiers, guaranteeAmount: 40000,
+      guaranteeStartupRate: 0.1, guaranteeStartupMonths: 3, monthNumber: 3,
+    });
+    expect(result).toBeCloseTo(135000, 5);
+  });
+
+  it("month 4+, 200,000円 sales -> 40,000円 (flat guarantee only, no startup bonus)", () => {
+    const result = slideScaleCommission({
+      workedSales: 200000, tiers, guaranteeAmount: 40000,
+      guaranteeStartupRate: 0.1, guaranteeStartupMonths: 3, monthNumber: 4,
+    });
+    expect(result).toBeCloseTo(40000, 5);
+  });
+});
+
+describe("namedCustomerCommission", () => {
+  it("applies the normal rate on a day the earning staff worked", () => {
+    const tabs = [tab({ customer_id: "shimachan", business_date: "2026-07-01", tab_items: [item({ price: 10000, qty: 1 })] })];
+    const rules = [rule({ customer_id: "shimachan", staff_id: "maasa", rate: 0.21, day_off_rate: 0.15 })];
+    const workedSet = attendanceWorkedSet([attendanceRow("maasa", "2026-07-01")]);
+    const result = namedCustomerCommission(tabs, rules, () => "まあさ", workedSet, 0.1);
+    expect(result[0].commission).toBeCloseTo(tabTotal(tabs[0].tab_items, 0.1, null, null) * 0.21, 5);
+  });
+
+  it("applies the day-off rate when the earning staff did not work that day", () => {
+    const tabs = [tab({ customer_id: "shimachan", business_date: "2026-07-02", tab_items: [item({ price: 10000, qty: 1 })] })];
+    const rules = [rule({ customer_id: "shimachan", staff_id: "maasa", rate: 0.21, day_off_rate: 0.15 })];
+    const workedSet = attendanceWorkedSet([attendanceRow("maasa", "2026-07-01")]); // 7/2は出勤なし
+    const result = namedCustomerCommission(tabs, rules, () => "まあさ", workedSet, 0.1);
+    expect(result[0].commission).toBeCloseTo(tabTotal(tabs[0].tab_items, 0.1, null, null) * 0.15, 5);
+  });
+
+  it("sums multiple rules crediting the same staff from different customers", () => {
+    const tabs = [
+      tab({ customer_id: "yuukun", business_date: "2026-07-01", tab_items: [item({ price: 10000, qty: 1 })] }),
+      tab({ customer_id: "shimachan", business_date: "2026-07-01", tab_items: [item({ price: 20000, qty: 1 })] }),
+    ];
+    const rules = [
+      rule({ customer_id: "yuukun", staff_id: "maasa", rate: 0.1, day_off_rate: 0 }),
+      rule({ customer_id: "shimachan", staff_id: "maasa", rate: 0.21, day_off_rate: 0.15 }),
+    ];
+    const workedSet = attendanceWorkedSet([attendanceRow("maasa", "2026-07-01")]);
+    const result = namedCustomerCommission(tabs, rules, () => "まあさ", workedSet, 0.1);
+    const expected =
+      tabTotal(tabs[0].tab_items, 0.1, null, null) * 0.1 + tabTotal(tabs[1].tab_items, 0.1, null, null) * 0.21;
+    expect(result.find((c) => c.staffId === "maasa")?.commission).toBeCloseTo(expected, 5);
+  });
+});
+
+describe("mergeStaffCommissions", () => {
+  function commissionRow(staffId: string, commission: number) {
+    return {
+      staffId,
+      name: staffId,
+      salesExTax: 0,
+      salesWithTax: commission * 5,
+      drinkCount: 0,
+      drinkBack: 0,
+      salesBack: 0,
+      commission,
+    };
+  }
+
+  it("sums commission fields for the same staffId across groups", () => {
+    const groupA = [commissionRow("a", 1000)];
+    const groupB = [commissionRow("a", 500), commissionRow("b", 300)];
+    const result = mergeStaffCommissions(groupA, groupB);
+    expect(result.find((c) => c.staffId === "a")?.commission).toBe(1500);
+    expect(result.find((c) => c.staffId === "b")?.commission).toBe(300);
   });
 });

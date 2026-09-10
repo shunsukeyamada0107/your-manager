@@ -44,6 +44,11 @@ create table stores (
   settings_pin_required     boolean not null default false, -- 設定タブを開く際にオーナー専用の暗証番号(owner_pin)入力を必須にするか
   pay_cycle                 text not null default 'monthly' check (pay_cycle in ('monthly','weekly','daily')), -- 給与の支払いサイクル（monthly=月払い、weekly=週払い、daily=日払い）。給与明細作成時の対象期間の選び方に反映される
   commission_tax_basis      text not null default 'with_tax' check (commission_tax_basis in ('with_tax','pre_tax')), -- 歩合の計算を消費税込みの金額でやるか(with_tax)、消費税抜きの小計でやるか(pre_tax)
+  slide_scale_tiers         jsonb not null default '[]'::jsonb, -- 月間個人売上に対する非マージナル方式のスライド歩合ティア表。
+                                                                  -- [{"min_amount":300000,"rate":0.22}, ...] の形で、
+                                                                  -- 「その額以上ならこの率」を月間合計にそのまま1回だけ掛ける
+                                                                  -- （段階的な累進ではない）。staff.commission_mode='primary_customer_slide'
+                                                                  -- のスタッフの給与明細計算にのみ使う
   created_at                timestamptz not null default now()
 );
 
@@ -90,6 +95,21 @@ create table staff (
   commission_basis    text not null default 'own_tabs' check (commission_basis in ('own_tabs','total_sales')), -- 歩合の対象範囲。own_tabs=自分が担当した伝票の売上（通常）、total_sales=店舗全体の売上（この場合、通常の按分歩合の代わりにtotal_sales_commission_rateだけを使う）
   total_sales_commission_rate numeric, -- commission_basis='total_sales'の場合に使う、その人専用の歩合率（0.05=5%）。nullなら歩合0扱い
   commission_rate_override numeric, -- commission_basis='own_tabs'の人の歩合率を店舗設定(stores.commission_rate)と別に指定する場合の上書き値。null=店舗設定に従う
+  commission_mode     text not null default 'standard'
+                        check (commission_mode in ('standard','primary_customer_flat','primary_customer_slide')),
+                        -- standard=通常の按分歩合のみ。primary_customer_flat=担当客(customers.primary_staff_id)の
+                        -- 伝票を、実際の接客者が誰であっても丸ごと固定率で自分の歩合にする。
+                        -- primary_customer_slide=同様に丸ごと自分の歩合にするが、出勤日分は月間スライド歩合の対象、
+                        -- 非出勤日分は別建ての固定率（月間集計には含めない）
+  primary_customer_rate numeric, -- commission_mode='primary_customer_flat'用の固定歩合率（例: 0.42）
+  primary_customer_day_off_rate numeric, -- commission_mode='primary_customer_slide'用、本人がその営業日に
+                                          -- 出勤していない場合の担当客売上に適用する固定歩合率（月間個人売上の集計には含めない）
+  commission_start_date date, -- 歩合のみのスタッフとしての起算日（staff.created_atとは別概念）。
+                               -- primary_customer_slideの保証額アップ対象月数の判定にのみ使う
+  primary_customer_guarantee_amount numeric, -- primary_customer_slide用の月間保証額の下限（例: 40000）
+  primary_customer_guarantee_startup_rate numeric, -- 起算からprimary_customer_guarantee_startup_monthsヶ月だけ、
+                                                     -- 保証額に「本人の担当客売上(出勤日分)×この率」を上乗せする率
+  primary_customer_guarantee_startup_months integer, -- 上記の上乗せが適用される月数（例: 3）
   created_at          timestamptz not null default now()
 );
 
@@ -109,6 +129,26 @@ create table customers (
   memo              text not null default '',
   active            boolean not null default true, -- ソフトデリート（staff.activeと同じ方式）
   created_at        timestamptz not null default now()
+);
+
+-- ------------------------------------------------------------
+-- 3c. 顧客ごとの指名歩合ルール（誰の売上が、誰の歩合にいくら入るか）
+--     実際に接客したスタッフとは別のスタッフに、その顧客の売上の一部を歩合として加算する。
+--     既存の按分歩合（staffCommissionBreakdown）に対して完全に加算方式で、置き換えではない
+--     （置き換えが必要な「担当客を丸ごと自分の歩合にする」パターンはcustomers.primary_staff_idと
+--     staff.commission_modeで表現する。こちらは指名料のような上乗せのみを扱う）。
+--     1顧客に対して複数スタッフの行、1スタッフに対して複数顧客の行、どちらも自然に張れる
+-- ------------------------------------------------------------
+create table customer_staff_commission_rules (
+  id            uuid primary key default gen_random_uuid(),
+  store_id      uuid not null references stores(id) on delete cascade,
+  customer_id   uuid not null references customers(id) on delete cascade,
+  staff_id      uuid not null references staff(id) on delete cascade, -- 歩合を受け取るスタッフ
+  rate          numeric not null, -- 通常時（そのスタッフがその伝票の営業日に出勤している場合）の歩合率
+  day_off_rate  numeric not null default 0, -- 本人がその営業日に出勤していない場合の歩合率（多くは0）
+  note          text, -- 人が読むための補足（例:「半分×42%」）。歩合率自体はrate/day_off_rateにフラットな数値で持つ
+  created_at    timestamptz not null default now(),
+  unique (customer_id, staff_id)
 );
 
 -- ------------------------------------------------------------
@@ -270,6 +310,7 @@ alter table stores        enable row level security;
 alter table store_members enable row level security;
 alter table staff         enable row level security;
 alter table customers     enable row level security;
+alter table customer_staff_commission_rules enable row level security;
 alter table menu_items    enable row level security;
 alter table tabs          enable row level security;
 alter table tab_items     enable row level security;
@@ -333,6 +374,12 @@ create policy "store members can access their customers"
 
 create policy "org members can view their organization's customers"
   on customers for select using (store_id in (select my_org_store_ids()));
+
+create policy "store members can access their customer commission rules"
+  on customer_staff_commission_rules for all using (store_id in (select my_store_ids()));
+
+create policy "org members can view their organization's customer commission rules"
+  on customer_staff_commission_rules for select using (store_id in (select my_org_store_ids()));
 
 create policy "store members can access their menu"
   on menu_items for all using (store_id in (select my_store_ids()));
@@ -420,6 +467,9 @@ create index if not exists idx_store_members_user_id on store_members(user_id);
 
 create index if not exists idx_staff_store_id on staff(store_id);
 create index if not exists idx_customers_store_id on customers(store_id);
+create index if not exists idx_customer_staff_commission_rules_store_id on customer_staff_commission_rules(store_id);
+create index if not exists idx_customer_staff_commission_rules_customer_id on customer_staff_commission_rules(customer_id);
+create index if not exists idx_customer_staff_commission_rules_staff_id on customer_staff_commission_rules(staff_id);
 create index if not exists idx_menu_items_store_id on menu_items(store_id);
 
 create index if not exists idx_tabs_store_business_date on tabs(store_id, business_date);

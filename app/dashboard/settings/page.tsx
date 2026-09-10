@@ -11,6 +11,10 @@ import {
   Staff,
   Customer,
   CustomerStats,
+  CustomerStaffCommissionRule,
+  CommissionMode,
+  SlideScaleTier,
+  DEFAULT_SLIDE_SCALE_TIERS,
   CommissionScheme,
   CommissionTaxBasis,
   DEFAULT_DRINK_BACK_AMOUNT,
@@ -26,6 +30,12 @@ import {
   totalSalesCommissionStaff,
   commissionRateResolver,
   customerStats,
+  attendanceWorkedSet,
+  primaryCustomerOwnerResolver,
+  primaryCustomerSalesBreakdown,
+  slideScaleCommission,
+  commissionMonthNumber,
+  namedCustomerCommission,
   CommissionBasis,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
@@ -133,6 +143,7 @@ export default function SettingsPage() {
     reportPinRequired,
     settingsPinRequired,
     storeMode,
+    slideScaleTiers,
     loading: storeLoading,
     reload,
   } = useStore();
@@ -152,6 +163,31 @@ export default function SettingsPage() {
   const [customerStatsById, setCustomerStatsById] = useState<Record<string, CustomerStats>>({});
   const [newCustomerName, setNewCustomerName] = useState("");
   const [newCustomerKana, setNewCustomerKana] = useState("");
+
+  // 顧客ごとの指名歩合ルール（誰の売上が、誰の歩合にいくら入るか）
+  const [customerRules, setCustomerRules] = useState<Record<string, CustomerStaffCommissionRule[]>>({});
+  const [customerRuleOpenIds, setCustomerRuleOpenIds] = useState<Set<string>>(new Set());
+  type NewRuleDraft = { staffId: string; rate: string; dayOffRate: string; note: string };
+  const emptyNewRuleDraft: NewRuleDraft = { staffId: "", rate: "", dayOffRate: "0", note: "" };
+  const [newRuleDrafts, setNewRuleDrafts] = useState<Record<string, NewRuleDraft>>({});
+  type RuleDraft = { rate: string; dayOffRate: string; note: string };
+  const [ruleDrafts, setRuleDrafts] = useState<Record<string, RuleDraft>>({});
+
+  // スタッフの「担当客を丸ごと自分の歩合にする」設定（固定歩合／月間スライド歩合）
+  const [primaryCustomerOpenIds, setPrimaryCustomerOpenIds] = useState<Set<string>>(new Set());
+  type PrimaryCustomerDraft = {
+    mode: CommissionMode;
+    rate: string;
+    dayOffRate: string;
+    startDate: string;
+    guaranteeAmount: string;
+    guaranteeStartupRate: string;
+    guaranteeStartupMonths: string;
+  };
+  const [primaryCustomerDrafts, setPrimaryCustomerDrafts] = useState<Record<string, PrimaryCustomerDraft>>({});
+
+  // 店舗のスライド歩合ティア表（設定タブの店舗設定カードで編集、保存はsaveStoreSettings()でまとめて行う）
+  const [slideScaleTiersDraft, setSlideScaleTiersDraft] = useState<{ minAmount: string; rate: string }[]>([]);
   const [tabLogs, setTabLogs] = useState<TabLog[]>([]);
   const [menuName, setMenuName] = useState("");
   const [menuPrice, setMenuPrice] = useState("");
@@ -197,6 +233,8 @@ export default function SettingsPage() {
     allowance: number;
     commission: number;
     personalSales: number;
+    namedCustomerCommission: number; // 指名歩合（加算）
+    primaryCustomerCommission: number; // 担当客の指名固定/スライド歩合
     hourlyHours: number;
     hourlyCost: number;
     total: number;
@@ -237,6 +275,9 @@ export default function SettingsPage() {
     setDrinkBackAmountDraft(String(drinkBackAmount));
     setThemeDraft(theme);
     setStoreModeDraft(storeMode);
+    setSlideScaleTiersDraft(
+      slideScaleTiers.map((t) => ({ minAmount: String(t.minAmount), rate: String(Math.round(t.rate * 100)) }))
+    );
     setShowInsightsDraft(showInsights);
     setAcceptsCardDraft(acceptsCard);
     setAcceptsPaypayDraft(acceptsPaypay);
@@ -257,6 +298,7 @@ export default function SettingsPage() {
     drinkBackAmount,
     theme,
     storeMode,
+    slideScaleTiers,
     showInsights,
     acceptsCard,
     acceptsPaypay,
@@ -328,6 +370,29 @@ export default function SettingsPage() {
         ])
       )
     );
+    setPrimaryCustomerDrafts(
+      Object.fromEntries(
+        ((staffData as Staff[]) ?? []).map((s) => [
+          s.id,
+          {
+            mode: s.commission_mode,
+            rate: s.primary_customer_rate != null ? String(Math.round(s.primary_customer_rate * 100)) : "",
+            dayOffRate:
+              s.primary_customer_day_off_rate != null ? String(Math.round(s.primary_customer_day_off_rate * 100)) : "",
+            startDate: s.commission_start_date ?? "",
+            guaranteeAmount: s.primary_customer_guarantee_amount != null ? String(s.primary_customer_guarantee_amount) : "",
+            guaranteeStartupRate:
+              s.primary_customer_guarantee_startup_rate != null
+                ? String(Math.round(s.primary_customer_guarantee_startup_rate * 100))
+                : "",
+            guaranteeStartupMonths:
+              s.primary_customer_guarantee_startup_months != null
+                ? String(s.primary_customer_guarantee_startup_months)
+                : "",
+          },
+        ])
+      )
+    );
 
     const { data: tabLogsData } = await supabase
       .from("tab_logs")
@@ -379,9 +444,33 @@ export default function SettingsPage() {
           ((customersData as Customer[]) ?? []).map((c) => [c.id, customerStats(tabsByCustomer[c.id] ?? [], taxRate)])
         )
       );
+
+      // 顧客ごとの指名歩合ルール（誰の売上が、誰の歩合にいくら入るか）
+      const { data: rulesData } = await supabase
+        .from("customer_staff_commission_rules")
+        .select("*")
+        .eq("store_id", storeId);
+      const rulesByCustomer: Record<string, CustomerStaffCommissionRule[]> = {};
+      ((rulesData as CustomerStaffCommissionRule[]) ?? []).forEach((r) => {
+        (rulesByCustomer[r.customer_id] ??= []).push(r);
+      });
+      setCustomerRules(rulesByCustomer);
+      setRuleDrafts(
+        Object.fromEntries(
+          ((rulesData as CustomerStaffCommissionRule[]) ?? []).map((r) => [
+            r.id,
+            {
+              rate: String(Math.round(r.rate * 100)),
+              dayOffRate: String(Math.round(r.day_off_rate * 100)),
+              note: r.note ?? "",
+            },
+          ])
+        )
+      );
     } else {
       setCustomers([]);
       setCustomerStatsById({});
+      setCustomerRules({});
     }
   }, [storeId, storeMode, taxRate]);
 
@@ -613,7 +702,7 @@ export default function SettingsPage() {
 
     const { start, end, label } = payslipPeriodRange(payslipPeriod);
 
-    const [{ data: tabsData }, { data: attData }] = await Promise.all([
+    const [{ data: tabsData }, { data: attData }, { data: ruleRows }, { data: customersData }] = await Promise.all([
       supabase
         .from("tabs")
         .select("*, tab_items(*)")
@@ -628,10 +717,23 @@ export default function SettingsPage() {
         .eq("staff_id", payslipStaffId)
         .gte("business_date", start)
         .lte("business_date", end),
+      storeMode === "club"
+        ? supabase
+            .from("customer_staff_commission_rules")
+            .select("*")
+            .eq("store_id", storeId)
+            .eq("staff_id", payslipStaffId)
+        : Promise.resolve({ data: [] as CustomerStaffCommissionRule[] }),
+      storeMode === "club"
+        ? supabase.from("customers").select("*").eq("store_id", storeId)
+        : Promise.resolve({ data: [] as Customer[] }),
     ]);
 
     const isEligible = (staffId: string) => staff.find((x) => x.id === staffId)?.commission_eligible ?? true;
     const nameOf = (id: string | null) => staff.find((x) => x.id === id)?.name ?? "(元スタッフ)";
+    const workedSet = attendanceWorkedSet((attData as Attendance[]) ?? []);
+    const ownerOf = primaryCustomerOwnerResolver((customersData as Customer[]) ?? [], staff);
+
     const myCommission = staffCommissionBreakdown(
       (tabsData as TabWithItems[]) ?? [],
       nameOf,
@@ -642,11 +744,53 @@ export default function SettingsPage() {
       isEligible,
       commissionTaxBasisResolver(staff, commissionTaxBasis),
       totalSalesCommissionStaff(staff),
-      commissionRateResolver(staff, commissionRate)
+      commissionRateResolver(staff, commissionRate),
+      ownerOf
     ).find((c) => c.staffId === payslipStaffId);
     const commission = myCommission?.commission ?? 0;
     const personalSales = myCommission?.salesWithTax ?? 0;
     const hourly = hourlyLaborBreakdown((attData as Attendance[]) ?? [], nameOf)[0] ?? null;
+
+    // 仕組み1：指名歩合（実際の接客者とは別に、指名された分だけ加算）
+    const namedRules = (ruleRows as CustomerStaffCommissionRule[]) ?? [];
+    const namedCommission = namedRules.length
+      ? namedCustomerCommission((tabsData as TabWithItems[]) ?? [], namedRules, nameOf, workedSet, taxRate).find(
+          (c) => c.staffId === payslipStaffId
+        )?.commission ?? 0
+      : 0;
+
+    // 仕組み2：担当客の指名固定/スライド歩合（丸ごと帰属）
+    let primaryCustomerCommission = 0;
+    if (s.commission_mode !== "standard") {
+      const sales = primaryCustomerSalesBreakdown(
+        (tabsData as TabWithItems[]) ?? [],
+        nameOf,
+        ownerOf,
+        workedSet,
+        taxRate
+      ).find((r) => r.staffId === payslipStaffId) ?? {
+        staffId: payslipStaffId,
+        name: s.name,
+        workedSales: 0,
+        offDaySales: 0,
+      };
+
+      if (s.commission_mode === "primary_customer_flat") {
+        primaryCustomerCommission = (sales.workedSales + sales.offDaySales) * (s.primary_customer_rate ?? 0);
+      } else if (s.commission_mode === "primary_customer_slide") {
+        const monthNumber = commissionMonthNumber(s.commission_start_date ?? start, start.slice(0, 7));
+        const slide = slideScaleCommission({
+          workedSales: sales.workedSales,
+          tiers: slideScaleTiers,
+          guaranteeAmount: s.primary_customer_guarantee_amount ?? 0,
+          guaranteeStartupRate: s.primary_customer_guarantee_startup_rate ?? 0,
+          guaranteeStartupMonths: s.primary_customer_guarantee_startup_months ?? 0,
+          monthNumber,
+        });
+        const offDayFlat = sales.offDaySales * (s.primary_customer_day_off_rate ?? 0);
+        primaryCustomerCommission = slide + offDayFlat;
+      }
+    }
 
     const base = s.base_salary ?? 0;
     const allowance = s.special_allowance ?? 0;
@@ -660,9 +804,11 @@ export default function SettingsPage() {
       allowance,
       commission,
       personalSales,
+      namedCustomerCommission: namedCommission,
+      primaryCustomerCommission,
       hourlyHours,
       hourlyCost,
-      total: base + allowance + commission + hourlyCost,
+      total: base + allowance + commission + namedCommission + primaryCustomerCommission + hourlyCost,
     });
     setGeneratingPayslip(false);
     setShowPayslipPicker(false);
@@ -790,6 +936,79 @@ export default function SettingsPage() {
     loadData();
   }
 
+  function toggleCustomerRuleOpen(customerId: string) {
+    setCustomerRuleOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(customerId)) next.delete(customerId);
+      else next.add(customerId);
+      return next;
+    });
+  }
+
+  async function addCustomerRule(customerId: string) {
+    if (!storeId) return;
+    const d = newRuleDrafts[customerId] ?? emptyNewRuleDraft;
+    if (!d.staffId || d.rate.trim() === "") return;
+    await supabase.from("customer_staff_commission_rules").insert({
+      store_id: storeId,
+      customer_id: customerId,
+      staff_id: d.staffId,
+      rate: Number(d.rate) / 100,
+      day_off_rate: d.dayOffRate.trim() === "" ? 0 : Number(d.dayOffRate) / 100,
+      note: d.note.trim() || null,
+    });
+    setNewRuleDrafts((m) => ({ ...m, [customerId]: emptyNewRuleDraft }));
+    loadData();
+  }
+
+  async function saveCustomerRuleRow(ruleId: string) {
+    const d = ruleDrafts[ruleId];
+    if (!d) return;
+    await supabase
+      .from("customer_staff_commission_rules")
+      .update({
+        rate: Number(d.rate) / 100,
+        day_off_rate: d.dayOffRate.trim() === "" ? 0 : Number(d.dayOffRate) / 100,
+        note: d.note.trim() || null,
+      })
+      .eq("id", ruleId);
+    loadData();
+  }
+
+  async function removeCustomerRule(ruleId: string) {
+    await supabase.from("customer_staff_commission_rules").delete().eq("id", ruleId);
+    loadData();
+  }
+
+  function togglePrimaryCustomerOpen(staffId: string) {
+    setPrimaryCustomerOpenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(staffId)) next.delete(staffId);
+      else next.add(staffId);
+      return next;
+    });
+  }
+
+  async function savePrimaryCustomerSettings(staffId: string) {
+    const d = primaryCustomerDrafts[staffId];
+    if (!d) return;
+    await supabase
+      .from("staff")
+      .update({
+        commission_mode: d.mode,
+        primary_customer_rate: d.rate.trim() === "" ? null : Number(d.rate) / 100,
+        primary_customer_day_off_rate: d.dayOffRate.trim() === "" ? null : Number(d.dayOffRate) / 100,
+        commission_start_date: d.startDate || null,
+        primary_customer_guarantee_amount: d.guaranteeAmount.trim() === "" ? null : Number(d.guaranteeAmount),
+        primary_customer_guarantee_startup_rate:
+          d.guaranteeStartupRate.trim() === "" ? null : Number(d.guaranteeStartupRate) / 100,
+        primary_customer_guarantee_startup_months:
+          d.guaranteeStartupMonths.trim() === "" ? null : Number(d.guaranteeStartupMonths),
+      })
+      .eq("id", staffId);
+    loadData();
+  }
+
   async function saveStoreSettings() {
     if (!storeId || !storeNameDraft.trim()) return;
     setSavingStoreSettings(true);
@@ -806,6 +1025,9 @@ export default function SettingsPage() {
         drink_back_amount: Number(drinkBackAmountDraft) || 0,
         theme: themeDraft,
         store_mode: storeModeDraft,
+        slide_scale_tiers: slideScaleTiersDraft
+          .filter((t) => t.minAmount.trim() !== "" && t.rate.trim() !== "")
+          .map((t) => ({ min_amount: Number(t.minAmount), rate: Number(t.rate) / 100 })),
         show_insights: showInsightsDraft,
         accepts_card: acceptsCardDraft,
         accepts_paypay: acceptsPaypayDraft,
@@ -1023,6 +1245,133 @@ export default function SettingsPage() {
             </button>
           </div>
         )}
+
+        {storeMode === "club" && renderPrimaryCustomerPanel(s)}
+      </div>
+    );
+  }
+
+  function renderPrimaryCustomerPanel(s: Staff) {
+    const open = primaryCustomerOpenIds.has(s.id);
+    const d = primaryCustomerDrafts[s.id] ?? {
+      mode: s.commission_mode,
+      rate: s.primary_customer_rate != null ? String(Math.round(s.primary_customer_rate * 100)) : "",
+      dayOffRate:
+        s.primary_customer_day_off_rate != null ? String(Math.round(s.primary_customer_day_off_rate * 100)) : "",
+      startDate: s.commission_start_date ?? "",
+      guaranteeAmount: s.primary_customer_guarantee_amount != null ? String(s.primary_customer_guarantee_amount) : "",
+      guaranteeStartupRate:
+        s.primary_customer_guarantee_startup_rate != null
+          ? String(Math.round(s.primary_customer_guarantee_startup_rate * 100))
+          : "",
+      guaranteeStartupMonths:
+        s.primary_customer_guarantee_startup_months != null
+          ? String(s.primary_customer_guarantee_startup_months)
+          : "",
+    };
+    const setDraft = (patch: Partial<typeof d>) =>
+      setPrimaryCustomerDrafts((m) => ({ ...m, [s.id]: { ...d, ...patch } }));
+
+    return (
+      <div>
+        <button
+          onClick={() => togglePrimaryCustomerOpen(s.id)}
+          className={`text-xs rounded-md border px-2 py-1 ${
+            s.commission_mode !== "standard" ? "border-gold text-gold bg-gold/10" : "border-line text-gray-500"
+          }`}
+        >
+          担当客の指名歩合{s.commission_mode !== "standard" ? "：設定済み" : "を設定"}
+          {open ? " ▲" : " ▼"}
+        </button>
+
+        {open && (
+          <div className="mt-2 rounded-md border border-line bg-elevated p-2.5 space-y-2">
+            <div className="text-xs text-gray-500">
+              クラブモードで担当キャストに指定した顧客の売上を、実際の接客者に関わらず丸ごとこのスタッフの歩合にします。
+            </div>
+            <select
+              value={d.mode}
+              onChange={(e) => setDraft({ mode: e.target.value as CommissionMode })}
+              className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-xs"
+            >
+              <option value="standard">標準（通常の按分歩合のみ）</option>
+              <option value="primary_customer_flat">指名固定歩合（常に同じ率）</option>
+              <option value="primary_customer_slide" disabled={payCycle !== "monthly"}>
+                指名スライド歩合（月間売上に応じた率{payCycle !== "monthly" ? "・月払いの店舗のみ選択可" : ""}）
+              </option>
+            </select>
+
+            {d.mode === "primary_customer_flat" && (
+              <div className="flex items-center gap-2">
+                <input
+                  value={d.rate}
+                  onChange={(e) => setDraft({ rate: e.target.value })}
+                  placeholder="歩合率(%)"
+                  inputMode="numeric"
+                  className="w-24 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                />
+                <span className="text-xs text-gray-500">%（本人が出勤していない日も同率）</span>
+              </div>
+            )}
+
+            {d.mode === "primary_customer_slide" && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    value={d.dayOffRate}
+                    onChange={(e) => setDraft({ dayOffRate: e.target.value })}
+                    placeholder="休みの日の歩合率(%)"
+                    inputMode="numeric"
+                    className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                  />
+                  <span className="text-xs text-gray-500">%（月間集計には含めず別建てで加算）</span>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label className="text-xs text-gray-500 shrink-0">起算日</label>
+                  <input
+                    type="date"
+                    value={d.startDate}
+                    onChange={(e) => setDraft({ startDate: e.target.value })}
+                    className="rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                  />
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    value={d.guaranteeAmount}
+                    onChange={(e) => setDraft({ guaranteeAmount: e.target.value })}
+                    placeholder="月間保証額(円)"
+                    inputMode="numeric"
+                    className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                  />
+                  <input
+                    value={d.guaranteeStartupRate}
+                    onChange={(e) => setDraft({ guaranteeStartupRate: e.target.value })}
+                    placeholder="起算特例の上乗せ率(%)"
+                    inputMode="numeric"
+                    className="w-36 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                  />
+                  <input
+                    value={d.guaranteeStartupMonths}
+                    onChange={(e) => setDraft({ guaranteeStartupMonths: e.target.value })}
+                    placeholder="上乗せの対象月数"
+                    inputMode="numeric"
+                    className="w-32 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                  />
+                </div>
+                <div className="text-xs text-gray-500">
+                  起算日から指定した月数だけ、保証額に「本人の担当客売上(出勤日分)×上乗せ率」を足した額とスライド歩合を比較し、高い方を支給します。それ以降は保証額のみで比較します。
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={() => savePrimaryCustomerSettings(s.id)}
+              className="text-xs rounded-md border border-line px-3 py-1.5 text-gray-300"
+            >
+              保存
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -1107,6 +1456,123 @@ export default function SettingsPage() {
         >
           保存
         </button>
+
+        {renderCustomerRulePanel(c)}
+      </div>
+    );
+  }
+
+  function renderCustomerRulePanel(c: Customer) {
+    const open = customerRuleOpenIds.has(c.id);
+    const rules = customerRules[c.id] ?? [];
+    const newDraft = newRuleDrafts[c.id] ?? emptyNewRuleDraft;
+
+    return (
+      <div>
+        <button
+          onClick={() => toggleCustomerRuleOpen(c.id)}
+          className={`text-xs rounded-md border px-2 py-1 ${
+            rules.length > 0 ? "border-gold text-gold bg-gold/10" : "border-line text-gray-500"
+          }`}
+        >
+          指名歩合ルール{rules.length > 0 ? `：${rules.length}件` : "を追加"}
+          {open ? " ▲" : " ▼"}
+        </button>
+
+        {open && (
+          <div className="mt-2 rounded-md border border-line bg-elevated p-2.5 space-y-2">
+            <div className="text-xs text-gray-500">
+              この顧客の売上について、実際に接客したスタッフとは別に、指定したスタッフへ上乗せの歩合を付けます。
+            </div>
+            {rules.map((r) => {
+              const rd = ruleDrafts[r.id] ?? { rate: String(Math.round(r.rate * 100)), dayOffRate: String(Math.round(r.day_off_rate * 100)), note: r.note ?? "" };
+              const staffName = staff.find((s) => s.id === r.staff_id)?.name ?? "(元スタッフ)";
+              return (
+                <div key={r.id} className="rounded-md border border-line p-2 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-gray-300">{staffName}</span>
+                    <button onClick={() => removeCustomerRule(r.id)} className="text-rose text-xs shrink-0">
+                      削除
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      value={rd.rate}
+                      onChange={(e) => setRuleDrafts((m) => ({ ...m, [r.id]: { ...rd, rate: e.target.value } }))}
+                      placeholder="通常時の率(%)"
+                      inputMode="numeric"
+                      className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                    />
+                    <input
+                      value={rd.dayOffRate}
+                      onChange={(e) => setRuleDrafts((m) => ({ ...m, [r.id]: { ...rd, dayOffRate: e.target.value } }))}
+                      placeholder="休みの日の率(%)"
+                      inputMode="numeric"
+                      className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                    />
+                  </div>
+                  <input
+                    value={rd.note}
+                    onChange={(e) => setRuleDrafts((m) => ({ ...m, [r.id]: { ...rd, note: e.target.value } }))}
+                    placeholder="メモ（任意。例：半分×42%）"
+                    className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                  />
+                  <button
+                    onClick={() => saveCustomerRuleRow(r.id)}
+                    className="text-xs rounded-md border border-line px-2 py-1 text-gray-300"
+                  >
+                    保存
+                  </button>
+                </div>
+              );
+            })}
+
+            <div className="rounded-md border border-dashed border-line p-2 space-y-1.5">
+              <select
+                value={newDraft.staffId}
+                onChange={(e) => setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, staffId: e.target.value } }))}
+                className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+              >
+                <option value="">歩合を受け取るスタッフ</option>
+                {staff.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  value={newDraft.rate}
+                  onChange={(e) => setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, rate: e.target.value } }))}
+                  placeholder="通常時の率(%)"
+                  inputMode="numeric"
+                  className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                />
+                <input
+                  value={newDraft.dayOffRate}
+                  onChange={(e) =>
+                    setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, dayOffRate: e.target.value } }))
+                  }
+                  placeholder="休みの日の率(%)"
+                  inputMode="numeric"
+                  className="w-28 rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+                />
+              </div>
+              <input
+                value={newDraft.note}
+                onChange={(e) => setNewRuleDrafts((m) => ({ ...m, [c.id]: { ...newDraft, note: e.target.value } }))}
+                placeholder="メモ（任意）"
+                className="w-full rounded-md bg-bg2 border border-line px-2 py-1 text-xs"
+              />
+              <button
+                onClick={() => addCustomerRule(c.id)}
+                className="rounded-md px-3 py-1.5 text-xs border border-dashed border-gold text-gold"
+              >
+                ＋ ルールを追加
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1200,6 +1666,58 @@ export default function SettingsPage() {
                 placeholder={String(DEFAULT_DRINK_BACK_AMOUNT)}
                 className="w-28 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
               />
+            </div>
+          )}
+          {storeMode === "club" && (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">
+                スライド歩合ティア（月間個人売上に応じた歩合率。該当する最大の閾値の率が1つだけ適用されます）
+              </label>
+              <div className="space-y-1.5">
+                {slideScaleTiersDraft.map((t, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <span className="text-xs text-gray-500 shrink-0">¥</span>
+                    <input
+                      value={t.minAmount}
+                      onChange={(e) =>
+                        setSlideScaleTiersDraft((rows) =>
+                          rows.map((r, ri) => (ri === i ? { ...r, minAmount: e.target.value } : r))
+                        )
+                      }
+                      inputMode="numeric"
+                      placeholder="以上の閾値"
+                      className="w-28 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                    />
+                    <span className="text-xs text-gray-500 shrink-0">→</span>
+                    <input
+                      value={t.rate}
+                      onChange={(e) =>
+                        setSlideScaleTiersDraft((rows) =>
+                          rows.map((r, ri) => (ri === i ? { ...r, rate: e.target.value } : r))
+                        )
+                      }
+                      inputMode="numeric"
+                      placeholder="率(%)"
+                      className="w-20 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                    />
+                    <span className="text-xs text-gray-500 shrink-0">%</span>
+                    <button
+                      type="button"
+                      onClick={() => setSlideScaleTiersDraft((rows) => rows.filter((_, ri) => ri !== i))}
+                      className="text-rose text-xs shrink-0"
+                    >
+                      削除
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setSlideScaleTiersDraft((rows) => [...rows, { minAmount: "", rate: "" }])}
+                  className="rounded-md px-3 py-1.5 text-xs border border-dashed border-gold text-gold"
+                >
+                  ＋ ティアを追加
+                </button>
+              </div>
             </div>
           )}
           <div>
@@ -2170,6 +2688,22 @@ export default function SettingsPage() {
                       ¥{Math.round(payslipData.commission).toLocaleString()}
                     </td>
                   </tr>
+                  {payslipData.namedCustomerCommission !== 0 && (
+                    <tr className="border-b border-gray-200">
+                      <td className="py-2.5">指名歩合</td>
+                      <td className="py-2.5 text-right font-mono">
+                        ¥{Math.round(payslipData.namedCustomerCommission).toLocaleString()}
+                      </td>
+                    </tr>
+                  )}
+                  {payslipData.primaryCustomerCommission !== 0 && (
+                    <tr className="border-b border-gray-200">
+                      <td className="py-2.5">担当客の指名歩合</td>
+                      <td className="py-2.5 text-right font-mono">
+                        ¥{Math.round(payslipData.primaryCustomerCommission).toLocaleString()}
+                      </td>
+                    </tr>
+                  )}
                   <tr className="border-b border-gray-200">
                     <td className="py-2.5">時給分（{payslipData.hourlyHours.toFixed(1)}時間）</td>
                     <td className="py-2.5 text-right font-mono">
