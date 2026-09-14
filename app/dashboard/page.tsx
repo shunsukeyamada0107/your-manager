@@ -1334,7 +1334,7 @@ function POSPageInner() {
                       type="datetime-local"
                       value={createdAtDraft}
                       onChange={(e) => setCreatedAtDraft(e.target.value)}
-                      className="rounded-md bg-bg border border-line px-1.5 py-0.5 text-xs"
+                      className="rounded-md bg-bg2 border border-line px-1.5 py-0.5 text-xs"
                     />
                   </span>
                   {activeTab.closed_at && (
@@ -1344,7 +1344,7 @@ function POSPageInner() {
                         type="datetime-local"
                         value={closedAtDraft}
                         onChange={(e) => setClosedAtDraft(e.target.value)}
-                        className="rounded-md bg-bg border border-line px-1.5 py-0.5 text-xs"
+                        className="rounded-md bg-bg2 border border-line px-1.5 py-0.5 text-xs"
                       />
                     </span>
                   )}
@@ -1990,31 +1990,31 @@ function POSPageInner() {
                       value={newCustomerDraft.name}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, name: e.target.value }))}
                       placeholder="お名前"
-                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                     />
                     <input
                       value={newCustomerDraft.nameKana}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, nameKana: e.target.value }))}
                       placeholder="フリガナ(任意)"
-                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                     />
                     <input
                       value={newCustomerDraft.phone}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, phone: e.target.value }))}
                       placeholder="電話番号(任意)"
-                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                     />
                     <input
                       type="date"
                       value={newCustomerDraft.birthday}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, birthday: e.target.value }))}
-                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                     />
                     {staff.length > 0 && (
                       <select
                         value={newCustomerDraft.primaryStaffId}
                         onChange={(e) => setNewCustomerDraft((d) => ({ ...d, primaryStaffId: e.target.value }))}
-                        className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                        className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                       >
                         <option value="">担当キャスト未設定</option>
                         {staff.map((s) => (
@@ -2028,14 +2028,14 @@ function POSPageInner() {
                       value={newCustomerDraft.bottleKeep}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, bottleKeep: e.target.value }))}
                       placeholder="ボトルキープ(任意)"
-                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                     />
                     <textarea
                       value={newCustomerDraft.memo}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, memo: e.target.value }))}
                       placeholder="メモ(任意)"
                       rows={2}
-                      className="w-full rounded-md bg-bg border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                     />
                     <div className="flex gap-2">
                       <button
