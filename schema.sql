@@ -49,6 +49,7 @@ create table stores (
                                                                   -- 「その額以上ならこの率」を月間合計にそのまま1回だけ掛ける
                                                                   -- （段階的な累進ではない）。staff.commission_mode='primary_customer_slide'
                                                                   -- のスタッフの給与明細計算にのみ使う
+  round_up_unit              integer not null default 100 check (round_up_unit > 0), -- 会計金額の端数処理の単位（円）。既定は100円単位で切り上げ。1000円単位にする店舗もある
   created_at                timestamptz not null default now()
 );
 

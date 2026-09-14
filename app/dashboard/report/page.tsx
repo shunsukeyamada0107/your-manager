@@ -102,12 +102,12 @@ function nameSimilarity(a: string, b: string): number {
 
 // 伝票名を8割以上一致する表記ゆれ（タイポ・送り仮名違い等）ごとにまとめて来店回数・累計売上を集計し、
 // 2回以上来店したグループだけを返す（グループ名は最初に登場した表記を代表として使う）
-function buildRepeatCustomers(rows: TabWithItems[], taxRate: number): RepeatCustomerRow[] {
+function buildRepeatCustomers(rows: TabWithItems[], taxRate: number, roundUnit: number): RepeatCustomerRow[] {
   const clusters: RepeatCustomerRow[] = [];
   rows.forEach((t) => {
     const key = t.name.trim();
     if (!key) return;
-    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
     const cluster = clusters.find((c) => nameSimilarity(c.name, key) >= REPEAT_NAME_SIMILARITY_THRESHOLD);
     if (cluster) {
       cluster.visits += 1;
@@ -140,12 +140,12 @@ function genderTotals(rows: TabWithItems[]): GenderTotals {
 type CustomerGroup = { name: string; visits: number; total: number; avg: number; firstVisit: string; lastVisit: string };
 
 // 検索結果（あいまい検索でヒットした伝票）を名前ごとにまとめ、来店回数・累計/平均額・初回/最終来店日を出す
-function groupCustomerResults(rows: TabWithItems[], taxRate: number): CustomerGroup[] {
+function groupCustomerResults(rows: TabWithItems[], taxRate: number, roundUnit: number): CustomerGroup[] {
   const byName = new Map<string, CustomerGroup>();
   rows.forEach((t) => {
     const key = t.name.trim();
     if (!key) return;
-    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
     const existing = byName.get(key);
     if (existing) {
       existing.visits += 1;
@@ -371,6 +371,7 @@ export default function ReportPage() {
     commissionTaxBasis,
     showInsights,
     reportPinRequired,
+    roundUnit,
     loading: storeLoading,
   } = useStore();
   const { date: businessDate, isToday } = useBusinessDate();
@@ -512,7 +513,9 @@ export default function ReportPage() {
             isEligibleOf,
             taxBasisOfMonth,
             totalSalesStaffOfMonth,
-            commissionRateOfMonth
+            commissionRateOfMonth,
+            undefined,
+            roundUnit
           ),
         };
       });
@@ -533,7 +536,9 @@ export default function ReportPage() {
         isEligibleOf,
         taxBasisOfMonth,
         totalSalesStaffOfMonth,
-        commissionRateOfMonth
+        commissionRateOfMonth,
+        undefined,
+        roundUnit
       )
     );
   }, [
@@ -548,6 +553,7 @@ export default function ReportPage() {
     commissionScheme,
     drinkBackAmount,
     commissionTaxBasis,
+    roundUnit,
   ]);
 
   useEffect(() => {
@@ -618,7 +624,9 @@ export default function ReportPage() {
     isEligible,
     taxBasisOf,
     totalSalesStaffList,
-    commissionRateOf
+    commissionRateOf,
+    undefined,
+    roundUnit
   );
   const commission = staffCommissionBreakdown(
     tabs,
@@ -630,7 +638,9 @@ export default function ReportPage() {
     isEligible,
     taxBasisOf,
     totalSalesStaffList,
-    commissionRateOf
+    commissionRateOf,
+    undefined,
+    roundUnit
   );
   const hourlyLabor = hourlyLaborBreakdown(attendance, staffName);
   const laborRows = buildLaborRows(hourlyLabor, commission, staff);
@@ -684,15 +694,17 @@ export default function ReportPage() {
     isEligible,
     taxBasisOf,
     totalSalesStaffList,
-    commissionRateOf
+    commissionRateOf,
+    undefined,
+    roundUnit
   );
   const monthHourlyLabor = hourlyLaborBreakdown(monthAttRaw, staffName);
   const monthLaborRows = buildLaborRows(monthHourlyLabor, monthCommission, staff);
 
   const todayAvgStay = avgStayMinutes(tabs);
   const monthAvgStay = avgStayMinutes(monthTabsRaw);
-  const repeatCustomers = buildRepeatCustomers(monthTabsRaw, taxRate);
-  const customerGroups = groupCustomerResults(customerResults, taxRate);
+  const repeatCustomers = buildRepeatCustomers(monthTabsRaw, taxRate, roundUnit);
+  const customerGroups = groupCustomerResults(customerResults, taxRate, roundUnit);
   const monthGender = genderTotals(monthTabsRaw);
 
   // 月間売上グラフ用：その月の1日〜末日まで欠けなく並べる（記録が無い日は0）
@@ -771,7 +783,7 @@ export default function ReportPage() {
       month_unsettled:
         monthUnsettled.length > 0
           ? monthUnsettled
-              .map((t) => `${t.name}${yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount))}`)
+              .map((t) => `${t.name}${yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit))}`)
               .join("\n")
           : "　",
     };
@@ -873,7 +885,7 @@ export default function ReportPage() {
           count: t.tab_items.reduce((a, x) => a + x.qty, 0),
           subtotal: Math.round(tabSubtotal(t.tab_items)),
           tax: Math.round(tabTax(t.tab_items, taxRate)),
-          total: Math.round(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount)),
+          total: Math.round(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit)),
         });
         row.getCell("subtotal").numFmt = '"¥"#,##0';
         row.getCell("tax").numFmt = '"¥"#,##0';
@@ -1092,7 +1104,7 @@ export default function ReportPage() {
                               {t.closed_at && ` ・${PAYMENT_METHOD_EMOJI[t.payment_method ?? "cash"]}`}
                             </span>
                             <span className="font-mono text-gray-300 shrink-0">
-                              {yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount))}
+                              {yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit))}
                             </span>
                           </div>
                           <div className="text-gray-500 mt-0.5 truncate">
@@ -1260,7 +1272,7 @@ export default function ReportPage() {
                       </span>
                     </span>
                     <span className="font-mono text-gray-400 shrink-0">
-                      {yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount))}
+                      {yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit))}
                     </span>
                   </div>
                   {mixed && (
@@ -1657,7 +1669,13 @@ export default function ReportPage() {
                 <span>合計</span>
                 <span>
                   {yen(
-                    tabTotal(viewingTab.tab_items, taxRate, viewingTab.discount_percent, viewingTab.discount_amount)
+                    tabTotal(
+                      viewingTab.tab_items,
+                      taxRate,
+                      viewingTab.discount_percent,
+                      viewingTab.discount_amount,
+                      roundUnit
+                    )
                   )}
                 </span>
               </div>

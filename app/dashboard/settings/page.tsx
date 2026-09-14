@@ -17,6 +17,7 @@ import {
   CommissionScheme,
   CommissionTaxBasis,
   DEFAULT_DRINK_BACK_AMOUNT,
+  DEFAULT_ROUND_UNIT,
   PayCycle,
   StaffCommission,
   StoreMode,
@@ -142,6 +143,7 @@ export default function SettingsPage() {
     settingsPinRequired,
     storeMode,
     slideScaleTiers,
+    roundUnit,
     loading: storeLoading,
     reload,
   } = useStore();
@@ -220,6 +222,7 @@ export default function SettingsPage() {
   const [commissionRateDraft, setCommissionRateDraft] = useState(String(Math.round(commissionRate * 100)));
   const [cutoffHourDraft, setCutoffHourDraft] = useState(String(cutoffHour));
   const [cashFloatDraft, setCashFloatDraft] = useState(String(cashFloatAmount));
+  const [roundUnitDraft, setRoundUnitDraft] = useState(String(roundUnit));
   const [accentColorDraft, setAccentColorDraft] = useState(accentColor);
   const [themeDraft, setThemeDraft] = useState<StoreTheme>(theme);
   const [storeModeDraft, setStoreModeDraft] = useState<StoreMode>(storeMode);
@@ -245,6 +248,7 @@ export default function SettingsPage() {
     setCutoffHourDraft(String(cutoffHour));
     setTemplateDraft(reportTemplate ?? DEFAULT_REPORT_TEMPLATE);
     setCashFloatDraft(String(cashFloatAmount));
+    setRoundUnitDraft(String(roundUnit));
     setAccentColorDraft(accentColor);
     setCommissionSchemeDraft(commissionScheme);
     setDrinkBackAmountDraft(String(drinkBackAmount));
@@ -274,6 +278,7 @@ export default function SettingsPage() {
     theme,
     storeMode,
     slideScaleTiers,
+    roundUnit,
     showInsights,
     acceptsCard,
     acceptsPaypay,
@@ -558,7 +563,9 @@ export default function SettingsPage() {
       isEligible,
       commissionTaxBasisResolver(staff, commissionTaxBasis),
       totalSalesCommissionStaff(staff),
-      commissionRateResolver(staff, commissionRate)
+      commissionRateResolver(staff, commissionRate),
+      undefined,
+      roundUnit
     );
     setMonthCommission(breakdown);
     setMonthCommissionLoaded(true);
@@ -649,7 +656,8 @@ export default function SettingsPage() {
       commissionTaxBasisResolver(staff, commissionTaxBasis),
       totalSalesCommissionStaff(staff),
       commissionRateResolver(staff, commissionRate),
-      ownerOf
+      ownerOf,
+      roundUnit
     ).find((c) => c.staffId === payslipStaffId);
     const commission = myCommission?.commission ?? 0;
     const personalSales = myCommission?.salesWithTax ?? 0;
@@ -658,7 +666,7 @@ export default function SettingsPage() {
     // 仕組み1：指名歩合（実際の接客者とは別に、指名された分だけ加算）
     const namedRules = (ruleRows as CustomerStaffCommissionRule[]) ?? [];
     const namedCommission = namedRules.length
-      ? namedCustomerCommission((tabsData as TabWithItems[]) ?? [], namedRules, nameOf, workedSet, taxRate).find(
+      ? namedCustomerCommission((tabsData as TabWithItems[]) ?? [], namedRules, nameOf, workedSet, taxRate, roundUnit).find(
           (c) => c.staffId === payslipStaffId
         )?.commission ?? 0
       : 0;
@@ -671,7 +679,8 @@ export default function SettingsPage() {
         nameOf,
         ownerOf,
         workedSet,
-        taxRate
+        taxRate,
+        roundUnit
       ).find((r) => r.staffId === payslipStaffId) ?? {
         staffId: payslipStaffId,
         name: s.name,
@@ -845,6 +854,7 @@ export default function SettingsPage() {
         commission_rate: Number(commissionRateDraft) / 100,
         business_day_cutoff_hour: Number(cutoffHourDraft),
         cash_float_amount: Number(cashFloatDraft) || 0,
+        round_up_unit: Number(roundUnitDraft) || DEFAULT_ROUND_UNIT,
         accent_color: accentColorDraft,
         commission_scheme: commissionSchemeDraft,
         drink_back_amount: Number(drinkBackAmountDraft) || 0,
@@ -1236,6 +1246,19 @@ export default function SettingsPage() {
               inputMode="numeric"
               className="w-24 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
             />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">会計金額の端数処理（会計・売上・歩合すべてに反映されます）</label>
+            <select
+              value={roundUnitDraft}
+              onChange={(e) => setRoundUnitDraft(e.target.value)}
+              className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+            >
+              <option value="1">切り上げなし（1円単位）</option>
+              <option value="10">10円単位で切り上げ（例: 4901円→4910円）</option>
+              <option value="100">100円単位で切り上げ（例: 4901円→5000円）</option>
+              <option value="1000">1000円単位で切り上げ（例: 4901円→5000円）</option>
+            </select>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">歩合の計算方式</label>

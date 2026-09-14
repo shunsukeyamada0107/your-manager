@@ -8,6 +8,7 @@ import {
   DEFAULT_BUSINESS_DAY_CUTOFF_HOUR,
   DEFAULT_DRINK_BACK_AMOUNT,
   DEFAULT_COMMISSION_TAX_BASIS,
+  DEFAULT_ROUND_UNIT,
   CommissionScheme,
   CommissionTaxBasis,
   PayCycle,
@@ -43,6 +44,7 @@ type StoreContextValue = {
   settingsPinRequired: boolean;
   storeMode: StoreMode;
   slideScaleTiers: SlideScaleTier[];
+  roundUnit: number;
   loading: boolean;
   reload: () => void;
 };
@@ -73,6 +75,7 @@ const StoreContext = createContext<StoreContextValue>({
   settingsPinRequired: false,
   storeMode: "bar",
   slideScaleTiers: DEFAULT_SLIDE_SCALE_TIERS,
+  roundUnit: DEFAULT_ROUND_UNIT,
   loading: true,
   reload: () => {},
 });
@@ -102,6 +105,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [settingsPinRequired, setSettingsPinRequired] = useState(false);
   const [storeMode, setStoreMode] = useState<StoreMode>("bar");
   const [slideScaleTiers, setSlideScaleTiers] = useState<SlideScaleTier[]>(DEFAULT_SLIDE_SCALE_TIERS);
+  const [roundUnit, setRoundUnit] = useState(DEFAULT_ROUND_UNIT);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -118,7 +122,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       const { data: member } = await supabase
         .from("store_members")
         .select(
-          "store_id, stores(name, tax_rate, commission_rate, business_day_cutoff_hour, report_template, cash_float_amount, accent_color, commission_scheme, drink_back_amount, theme, show_insights, accepts_card, accepts_paypay, accepts_other_epayment, enable_name_search, name_input_mode, pay_cycle, commission_tax_basis, report_pin_required, settings_pin_required, store_mode, slide_scale_tiers)"
+          "store_id, stores(name, tax_rate, commission_rate, business_day_cutoff_hour, report_template, cash_float_amount, accent_color, commission_scheme, drink_back_amount, theme, show_insights, accepts_card, accepts_paypay, accepts_other_epayment, enable_name_search, name_input_mode, pay_cycle, commission_tax_basis, report_pin_required, settings_pin_required, store_mode, slide_scale_tiers, round_up_unit)"
         )
         .eq("user_id", userData.user.id)
         .limit(1)
@@ -149,6 +153,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           settings_pin_required: boolean | null;
           store_mode: StoreMode | null;
           slide_scale_tiers: { min_amount: number; rate: number }[] | null;
+          round_up_unit: number | null;
         };
         const stores = member.stores as unknown as StoreRow | StoreRow[] | null;
         const store = Array.isArray(stores) ? stores[0] : stores;
@@ -176,6 +181,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setSlideScaleTiers(
           (store?.slide_scale_tiers ?? []).map((t) => ({ minAmount: t.min_amount, rate: t.rate }))
         );
+        setRoundUnit(store?.round_up_unit ?? DEFAULT_ROUND_UNIT);
       }
       setLoading(false);
     }
@@ -208,6 +214,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         settingsPinRequired,
         storeMode,
         slideScaleTiers,
+        roundUnit,
         loading,
         reload,
       }}

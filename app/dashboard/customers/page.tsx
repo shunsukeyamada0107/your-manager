@@ -93,7 +93,7 @@ const inputClass = "w-full rounded-md bg-bg2 border border-line px-2.5 py-1.5 te
 
 export default function CustomersPage() {
   const supabase = createClient();
-  const { storeId, storeMode, taxRate, settingsPinRequired, loading: storeLoading } = useStore();
+  const { storeId, storeMode, taxRate, roundUnit, settingsPinRequired, loading: storeLoading } = useStore();
 
   const [staff, setStaff] = useState<Staff[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -163,7 +163,10 @@ export default function CustomersPage() {
     });
     setCustomerStatsById(
       Object.fromEntries(
-        ((customersData as Customer[]) ?? []).map((c) => [c.id, customerStats(tabsByCustomer[c.id] ?? [], taxRate)])
+        ((customersData as Customer[]) ?? []).map((c) => [
+          c.id,
+          customerStats(tabsByCustomer[c.id] ?? [], taxRate, roundUnit),
+        ])
       )
     );
 
@@ -189,7 +192,7 @@ export default function CustomersPage() {
         ])
       )
     );
-  }, [storeId, storeMode, taxRate]);
+  }, [storeId, storeMode, taxRate, roundUnit]);
 
   useEffect(() => {
     loadData();

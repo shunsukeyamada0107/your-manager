@@ -170,6 +170,7 @@ export const DEFAULT_TAX_RATE = 0.10;
 export const DEFAULT_COMMISSION_RATE = 0.20;
 export const DEFAULT_BUSINESS_DAY_CUTOFF_HOUR = 6;
 export const DEFAULT_DRINK_BACK_AMOUNT = 200;
+export const DEFAULT_ROUND_UNIT = 100; // 会計時に切り上げる単位（円）
 
 export type CommissionScheme = "simple" | "drink_back";
 
@@ -208,19 +209,20 @@ export function tabDiscountAmount(
   return Math.min(preDiscountTotal, percentPart + fixedPart);
 }
 
-// 会計時の端数は100円単位で切り上げる（例: 1120円→1200円）
-export function roundUpTo100(n: number) {
-  return Math.ceil(n / 100) * 100;
+// 会計時の端数は指定した単位で切り上げる（例: unit=100なら1120円→1200円、unit=1000なら1120円→2000円）
+export function roundUpToUnit(n: number, unit: number = DEFAULT_ROUND_UNIT) {
+  return Math.ceil(n / unit) * unit;
 }
 
 export function tabTotal(
   items: TabItem[],
   taxRate: number = DEFAULT_TAX_RATE,
   discountPercent: number | null | undefined = null,
-  discountAmount: number | null | undefined = null
+  discountAmount: number | null | undefined = null,
+  roundUnit: number = DEFAULT_ROUND_UNIT
 ) {
   const raw = tabPreDiscountTotal(items, taxRate) - tabDiscountAmount(items, taxRate, discountPercent, discountAmount);
-  return roundUpTo100(raw);
+  return roundUpToUnit(raw, roundUnit);
 }
 
 // "#RRGGBB" → "R G B"（TailwindのCSS変数カラーに渡すための形式）。不正な値なら既定のゴールドにフォールバック
@@ -401,7 +403,8 @@ export function staffCommissionBreakdown(
   taxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
   totalSalesStaff: Array<{ staffId: string; rate: number }> = [],
   commissionRateFor: (staffId: string) => number = () => commissionRate,
-  primaryCustomerOwnerOf: (customerId: string | null) => string | null = () => null
+  primaryCustomerOwnerOf: (customerId: string | null) => string | null = () => null,
+  roundUnit: number = DEFAULT_ROUND_UNIT
 ): StaffCommission[] {
   const map: Record<string, StaffCommission> = {};
   const totalSalesStaffIds = new Set(totalSalesStaff.map((s) => s.staffId));
@@ -428,7 +431,7 @@ export function staffCommissionBreakdown(
     const preDiscountTotal = tabPreDiscountTotal(t.tab_items, taxRate);
     const adjustedTotal =
       preDiscountTotal - tabDiscountAmount(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
-    const roundedTotal = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    const roundedTotal = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
     const roundUpBonus = roundedTotal - adjustedTotal;
     // 割引後に残る割合（税込ベース）を税抜小計にも適用し、割引の効き方だけは税込・税抜で揃える
     const keepRatio = preDiscountTotal > 0 ? adjustedTotal / preDiscountTotal : 1;
@@ -536,7 +539,8 @@ export function daySummary(
   commissionTaxBasisFor: (staffId: string) => CommissionTaxBasis = () => DEFAULT_COMMISSION_TAX_BASIS,
   totalSalesStaff: Array<{ staffId: string; rate: number }> = [],
   commissionRateFor: (staffId: string) => number = () => commissionRate,
-  primaryCustomerOwnerOf: (customerId: string | null) => string | null = () => null
+  primaryCustomerOwnerOf: (customerId: string | null) => string | null = () => null,
+  roundUnit: number = DEFAULT_ROUND_UNIT
 ): DaySummary {
   const subtotal = tabs.reduce((a, t) => a + tabSubtotal(t.tab_items), 0);
   const tax = tabs.reduce((a, t) => a + tabTax(t.tab_items, taxRate), 0);
@@ -552,7 +556,8 @@ export function daySummary(
     commissionTaxBasisFor,
     totalSalesStaff,
     commissionRateFor,
-    primaryCustomerOwnerOf
+    primaryCustomerOwnerOf,
+    roundUnit
   ).reduce(
     (a, c) => a + c.commission,
     0
@@ -563,7 +568,7 @@ export function daySummary(
     card = 0,
     unsettled = 0;
   tabs.forEach((t) => {
-    const tot = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    const tot = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
     if (t.closed_at && t.payment_method === "cash") cash += tot;
     else if (t.closed_at && t.payment_method) card += tot; // カード・PayPay・その他電子決済はまとめて「現金以外」として集計
     else unsettled += tot;
@@ -597,11 +602,15 @@ export type CustomerStats = {
 // 顧客ごとの来店回数・累計売上・最終来店日を、その顧客に紐づく会計済み（closed_atがある）伝票から計算する。
 // customersテーブルには保存せず、設定タブの顧客管理セクションで都度この関数を呼んで表示する。
 // 呼び出し側であらかじめcustomer_idで絞り込んだtabsを渡す想定。
-export function customerStats(tabs: TabWithItems[], taxRate: number = DEFAULT_TAX_RATE): CustomerStats {
+export function customerStats(
+  tabs: TabWithItems[],
+  taxRate: number = DEFAULT_TAX_RATE,
+  roundUnit: number = DEFAULT_ROUND_UNIT
+): CustomerStats {
   const closed = tabs.filter((t) => t.closed_at);
   const visitCount = closed.length;
   const totalSales = closed.reduce(
-    (a, t) => a + tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount),
+    (a, t) => a + tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit),
     0
   );
   const lastVisitDate = closed.reduce<string | null>(
@@ -646,14 +655,15 @@ export function primaryCustomerSalesBreakdown(
   staffNameOf: (staffId: string | null) => string,
   ownerOf: (customerId: string | null) => string | null,
   workedSet: Set<string>,
-  taxRate: number = DEFAULT_TAX_RATE
+  taxRate: number = DEFAULT_TAX_RATE,
+  roundUnit: number = DEFAULT_ROUND_UNIT
 ): PrimaryCustomerSales[] {
   const map: Record<string, PrimaryCustomerSales> = {};
   tabs.forEach((t) => {
     if (!t.closed_at || !t.customer_id) return;
     const ownerId = ownerOf(t.customer_id);
     if (!ownerId) return;
-    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
     if (!map[ownerId]) {
       map[ownerId] = { staffId: ownerId, name: staffNameOf(ownerId), workedSales: 0, offDaySales: 0 };
     }
@@ -712,7 +722,8 @@ export function namedCustomerCommission(
   rules: CustomerStaffCommissionRule[],
   staffNameOf: (staffId: string | null) => string,
   workedSet: Set<string>,
-  taxRate: number = DEFAULT_TAX_RATE
+  taxRate: number = DEFAULT_TAX_RATE,
+  roundUnit: number = DEFAULT_ROUND_UNIT
 ): StaffCommission[] {
   const rulesByCustomer: Record<string, CustomerStaffCommissionRule[]> = {};
   rules.forEach((r) => {
@@ -724,7 +735,7 @@ export function namedCustomerCommission(
     if (!t.closed_at || !t.customer_id) return;
     const matching = rulesByCustomer[t.customer_id];
     if (!matching?.length) return;
-    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount);
+    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
     matching.forEach((rule) => {
       const rate = didWorkOn(workedSet, rule.staff_id, t.business_date) ? rule.rate : rule.day_off_rate;
       if (!map[rule.staff_id]) {

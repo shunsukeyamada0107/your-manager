@@ -203,6 +203,7 @@ function POSPageInner() {
     enableNameSearch,
     nameInputMode,
     storeMode,
+    roundUnit,
   } = useStore();
   const { date: businessDate } = useBusinessDate();
   const [menu, setMenu] = useState<MenuItem[]>([]);
@@ -1105,7 +1106,7 @@ function POSPageInner() {
           </div>
           <div className="flex justify-between text-gold font-bold text-lg pt-1 border-t border-dashed border-line">
             <span>合計</span>
-            <span>¥{tabTotal(tab.tab_items, taxRate, tab.discount_percent, tab.discount_amount).toLocaleString()}</span>
+            <span>¥{tabTotal(tab.tab_items, taxRate, tab.discount_percent, tab.discount_amount, roundUnit).toLocaleString()}</span>
           </div>
         </div>
 
@@ -1142,7 +1143,7 @@ function POSPageInner() {
   }
 
   const todaySalesTotal = closedTabs.reduce(
-    (a, t) => a + tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount),
+    (a, t) => a + tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit),
     0
   );
 
@@ -1219,7 +1220,7 @@ function POSPageInner() {
                     {elapsedMin}分経過
                   </div>
                   <div className="text-base font-mono font-bold mt-1.5 text-gold">
-                    ¥{tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount).toLocaleString()}
+                    ¥{tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit).toLocaleString()}
                   </div>
                   {lastOrder && <div className="text-[10.5px] font-bold mt-1 text-rose">⏰ ラストオーダー</div>}
                 </button>
@@ -1253,7 +1254,7 @@ function POSPageInner() {
                       {t.payment_method ? PAYMENT_METHOD_EMOJI[t.payment_method] : "💴"} {t.name}
                     </div>
                     <div className="text-xs font-mono mt-0.5">
-                      ¥{tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount).toLocaleString()}
+                      ¥{tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit).toLocaleString()}
                     </div>
                   </button>
                 );
@@ -1467,7 +1468,8 @@ function POSPageInner() {
                     activeTab.tab_items,
                     taxRate,
                     activeTab.discount_percent,
-                    activeTab.discount_amount
+                    activeTab.discount_amount,
+                    roundUnit
                   )}
                   prefix="¥"
                 />
@@ -1803,7 +1805,8 @@ function POSPageInner() {
                   activeTab.tab_items,
                   taxRate,
                   activeTab.discount_percent,
-                  activeTab.discount_amount
+                  activeTab.discount_amount,
+                  roundUnit
                 ).toLocaleString()}
               </span>
               を会計しますか？
@@ -1904,7 +1907,8 @@ function POSPageInner() {
                   activeTab.tab_items,
                   taxRate,
                   activeTab.discount_percent,
-                  activeTab.discount_amount
+                  activeTab.discount_amount,
+                  roundUnit
                 ).toLocaleString()}
               </span>
             </div>
@@ -2153,7 +2157,8 @@ function POSPageInner() {
                               t.tab_items,
                               taxRate,
                               t.discount_percent,
-                              t.discount_amount
+                              t.discount_amount,
+                              roundUnit
                             ).toLocaleString()}
                           </span>
                         </div>

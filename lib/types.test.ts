@@ -3,7 +3,7 @@ process.env.TZ = "Asia/Tokyo";
 
 import { describe, it, expect } from "vitest";
 import {
-  roundUpTo100,
+  roundUpToUnit,
   tabSubtotal,
   tabDiscountAmount,
   tabTax,
@@ -147,12 +147,18 @@ function attendanceRow(staffId: string, businessDate: string): Attendance {
   };
 }
 
-describe("roundUpTo100", () => {
-  it("rounds up to the nearest 100 yen", () => {
-    expect(roundUpTo100(1120)).toBe(1200);
-    expect(roundUpTo100(1200)).toBe(1200);
-    expect(roundUpTo100(1)).toBe(100);
-    expect(roundUpTo100(0)).toBe(0);
+describe("roundUpToUnit", () => {
+  it("rounds up to the nearest 100 yen by default", () => {
+    expect(roundUpToUnit(1120)).toBe(1200);
+    expect(roundUpToUnit(1200)).toBe(1200);
+    expect(roundUpToUnit(1)).toBe(100);
+    expect(roundUpToUnit(0)).toBe(0);
+  });
+
+  it("rounds up to a custom unit (e.g. 1000円)", () => {
+    expect(roundUpToUnit(4900, 1000)).toBe(5000);
+    expect(roundUpToUnit(3600, 1000)).toBe(4000);
+    expect(roundUpToUnit(5000, 1000)).toBe(5000);
   });
 });
 
@@ -180,6 +186,13 @@ describe("tab subtotal / discount / tax / total", () => {
     const items = [item({ price: 333, qty: 1 })];
     expect(tabTax(items, 0.1)).toBe(33); // 333*0.1=33.3 -> 33
     expect(tabTotal(items, 0.1)).toBe(400); // 333+33=366 -> 400
+  });
+
+  it("rounds the total up to a custom unit when the store uses one (e.g. 1000円)", () => {
+    // 4454*1.1=4899.4 -> 税込4900円 -> 1000円単位で切り上げ5000円
+    expect(tabTotal([item({ price: 4454, qty: 1 })], 0.1, null, null, 1000)).toBe(5000);
+    // 3273*1.1=3600.3 -> 税込3600円 -> 1000円単位で切り上げ4000円
+    expect(tabTotal([item({ price: 3273, qty: 1 })], 0.1, null, null, 1000)).toBe(4000);
   });
 
   it("matches the no-discount, round-number case exactly", () => {
