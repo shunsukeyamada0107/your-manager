@@ -457,8 +457,7 @@ export default function ExpensesPage() {
                       {outS ? outS.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) : "未入力"}
                     </span>
                     <span className="font-mono text-gray-400 flex items-center gap-2">
-                      {hrs.toFixed(1)}h /{" "}
-                      {a.wage_snapshot != null ? `¥${Math.round(hrs * a.wage_snapshot).toLocaleString()}` : "時給未設定"}
+                      {hrs.toFixed(1)}h
                       <button onClick={() => deleteAttendance(a.id)} className="text-rose">
                         ✕
                       </button>
