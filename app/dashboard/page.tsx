@@ -149,6 +149,22 @@ function formatDateTime(iso: string) {
   return new Date(iso).toLocaleString("ja-JP", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+// 営業日（YYYY-MM-DD）を伝票に小さく出す用の「9/30(火)」表記
+function formatBusinessDate(ymd: string) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const wd = "日月火水木金土"[new Date(y, m - 1, d).getDay()];
+  return `${m}/${d}(${wd})`;
+}
+
+// 営業日同士の日数差（タイムゾーンの影響を受けないようUTCで計算）
+function daysBetween(fromYmd: string, toYmd: string) {
+  const toUtc = (ymd: string) => {
+    const [y, m, d] = ymd.split("-").map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((toUtc(toYmd) - toUtc(fromYmd)) / 86400000);
+}
+
 // <input type="datetime-local"> はタイムゾーン無しの「YYYY-MM-DDTHH:mm」（ローカル時刻）を要求する
 function toDatetimeLocalValue(iso: string) {
   const d = new Date(iso);
@@ -234,6 +250,8 @@ function POSPageInner() {
   const [createdAtDraft, setCreatedAtDraft] = useState("");
   const [closedAtDraft, setClosedAtDraft] = useState("");
   const [timesError, setTimesError] = useState<string | null>(null);
+  const [editingDate, setEditingDate] = useState(false);
+  const [dateDraft, setDateDraft] = useState("");
   const [operationError, setOperationError] = useState<string | null>(null);
   const [manualName, setManualName] = useState("");
   const [manualPrice, setManualPrice] = useState("");
@@ -243,12 +261,12 @@ function POSPageInner() {
   const [showEpaymentPicker, setShowEpaymentPicker] = useState(false);
   const [showReceipt, setShowReceipt] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
-  const [lastAction, setLastAction] = useState<{ tabId: string; label: string; run: () => void } | null>(null);
+  const [lastAction, setLastAction] = useState<{ tabId: string | null; label: string; run: () => void } | null>(null);
   const lastActionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const guestMaleInputRef = useRef<HTMLInputElement>(null);
   const guestFemaleInputRef = useRef<HTMLInputElement>(null);
 
-  function pushUndo(tabId: string, label: string, run: () => void) {
+  function pushUndo(tabId: string | null, label: string, run: () => void) {
     if (lastActionTimeoutRef.current) clearTimeout(lastActionTimeoutRef.current);
     setLastAction({ tabId, label, run });
     lastActionTimeoutRef.current = setTimeout(() => setLastAction(null), 8000);
@@ -466,11 +484,12 @@ function POSPageInner() {
   }, [activeTab?.id, activeTab?.memo]);
 
   // 別の伝票に切り替えたら、直前の「元に戻す」は文脈が変わるので消す
+  // （ただし別の日付へ移した直後の「元に戻す」は伝票の選択が外れても残す）
   useEffect(() => {
-    setLastAction(null);
+    setLastAction((prev) => (prev && prev.tabId === null ? prev : null));
     setEditingTabName(false);
     setEditingTimes(false);
-    if (lastActionTimeoutRef.current) clearTimeout(lastActionTimeoutRef.current);
+    setEditingDate(false);
   }, [activeTabId]);
 
   function staffName(staffId: string | null) {
@@ -720,6 +739,51 @@ function POSPageInner() {
     }
 
     setEditingTimes(false);
+    loadData();
+  }
+
+  // 伝票の営業日を別の日に移す（入力ミスや、過去日の伝票を後から付け替える用）。
+  // 来店・退店時刻も同じ日数だけずらし、営業日と時刻の整合を保つ。変更は tab_logs に残す
+  async function moveTabToDate(tab: TabRow, newDate: string, withUndo: boolean) {
+    if (!storeId || !newDate || newDate === tab.business_date) return;
+    const shiftMs = daysBetween(tab.business_date, newDate) * 86400000;
+    const shift = (iso: string) => new Date(new Date(iso).getTime() + shiftMs).toISOString();
+
+    const { error } = await supabase
+      .from("tabs")
+      .update({
+        business_date: newDate,
+        created_at: shift(tab.created_at),
+        ...(tab.closed_at ? { closed_at: shift(tab.closed_at) } : {}),
+      })
+      .eq("id", tab.id);
+    if (error) {
+      setOperationError("日付の変更に失敗しました。通信状況を確認してもう一度お試しください。");
+      return;
+    }
+
+    await supabase.from("tab_logs").insert({
+      store_id: storeId,
+      action: "time_edited",
+      tab_name: tab.name,
+      business_date: newDate,
+      guest_count: tab.guest_count,
+      note: `営業日 ${formatBusinessDate(tab.business_date)} → ${formatBusinessDate(newDate)}`,
+    });
+
+    setEditingDate(false);
+    if (newDate !== businessDate) setActiveTabId(null);
+    if (withUndo) {
+      const moved: TabRow = {
+        ...tab,
+        business_date: newDate,
+        created_at: shift(tab.created_at),
+        closed_at: tab.closed_at ? shift(tab.closed_at) : tab.closed_at,
+      };
+      pushUndo(newDate === businessDate ? tab.id : null, `「${tab.name}」を${formatBusinessDate(newDate)}に移動しました`, () =>
+        moveTabToDate(moved, tab.business_date, false)
+      );
+    }
     loadData();
   }
 
@@ -1214,6 +1278,7 @@ function POSPageInner() {
                       対応中
                     </span>
                   </div>
+                  <div className="text-[10px] text-gray-500 mt-0.5">{formatBusinessDate(t.business_date)}</div>
                   <div className="text-xs mt-1 text-gray-400 truncate">
                     {t.guest_count != null ? `${t.guest_count}名 ・ ` : ""}
                     {name ? `${name} ・ ` : ""}
@@ -1253,6 +1318,7 @@ function POSPageInner() {
                     <div className="text-sm font-bold truncate">
                       {t.payment_method ? PAYMENT_METHOD_EMOJI[t.payment_method] : "💴"} {t.name}
                     </div>
+                    <div className="text-[10px] text-gray-500 mt-0.5">{formatBusinessDate(t.business_date)}</div>
                     <div className="text-xs font-mono mt-0.5">
                       ¥{tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit).toLocaleString()}
                     </div>
@@ -1325,6 +1391,41 @@ function POSPageInner() {
                 </button>
               )}
             </div>
+
+            {editingDate ? (
+              <div className="flex items-center gap-2 flex-wrap text-xs text-gray-300">
+                <span>営業日</span>
+                <input
+                  type="date"
+                  value={dateDraft}
+                  onChange={(e) => setDateDraft(e.target.value)}
+                  className="rounded-md bg-bg2 border border-line px-1.5 py-0.5 text-xs"
+                />
+                <button
+                  onClick={() => moveTabToDate(activeTab, dateDraft, true)}
+                  disabled={!dateDraft || dateDraft === activeTab.business_date}
+                  className="text-gold text-xs font-bold disabled:opacity-40"
+                >
+                  保存
+                </button>
+                <button onClick={() => setEditingDate(false)} className="text-gray-400 text-xs">
+                  キャンセル
+                </button>
+              </div>
+            ) : (
+              <div className="text-[11px] text-gray-500">
+                {formatBusinessDate(activeTab.business_date)}
+                <button
+                  onClick={() => {
+                    setDateDraft(activeTab.business_date);
+                    setEditingDate(true);
+                  }}
+                  className="ml-1.5 underline"
+                >
+                  日付を変更
+                </button>
+              </div>
+            )}
 
             {editingTimes ? (
               <div className="rounded-md bg-bg2 border border-gold/50 px-2.5 py-2 space-y-1.5">
