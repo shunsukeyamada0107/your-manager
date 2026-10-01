@@ -289,22 +289,28 @@ export default function CustomersPage() {
     setConfirmDeleteId(null);
   }
 
-  // 伝票の「顧客情報」から ?customer=<id> 付きで来た場合は、その顧客を開いた状態で表示する
-  const [focusedFromLink, setFocusedFromLink] = useState(false);
+  // 伝票の「顧客情報」から ?customer=<id> 付きで来た場合は、その顧客だけを開いた状態で表示する
+  // （一覧の中までスクロールする方式だと、暗証番号の入力後や読み込みのタイミングで本人の位置に届かないため）
+  const [focusedCustomerId, setFocusedCustomerId] = useState<string | null>(null);
   useEffect(() => {
-    if (focusedFromLink || customers.length === 0) return;
     const id = new URLSearchParams(window.location.search).get("customer");
-    setFocusedFromLink(true);
-    if (!id || !customers.some((c) => c.id === id)) return;
+    if (!id) return;
+    setFocusedCustomerId(id);
     setExpandedIds((prev) => new Set(prev).add(id));
-    requestAnimationFrame(() => document.getElementById(`customer-${id}`)?.scrollIntoView({ block: "start" }));
-  }, [customers, focusedFromLink]);
+  }, []);
+  const focusedCustomer = focusedCustomerId ? customers.find((c) => c.id === focusedCustomerId) ?? null : null;
+
+  function showAllCustomers() {
+    setFocusedCustomerId(null);
+    window.history.replaceState(null, "", window.location.pathname);
+  }
 
   const filteredCustomers = useMemo(() => {
+    if (focusedCustomer) return [focusedCustomer];
     const q = searchQuery.trim();
     if (!q) return customers;
     return customers.filter((c) => c.name.includes(q) || (c.name_kana ?? "").includes(q));
-  }, [customers, searchQuery]);
+  }, [customers, searchQuery, focusedCustomer]);
 
   function renderCustomerRuleSection(c: Customer) {
     const rules = customerRules[c.id] ?? [];
@@ -440,7 +446,7 @@ export default function CustomersPage() {
     const primary = staffName(c.primary_staff_id);
 
     return (
-      <div key={c.id} id={`customer-${c.id}`} className="rounded-xl border border-line bg-elevated overflow-hidden scroll-mt-20">
+      <div key={c.id} className="rounded-xl border border-line bg-elevated overflow-hidden">
         <button
           onClick={() => toggleExpanded(c.id)}
           className="w-full flex items-center justify-between gap-3 px-3.5 py-3 text-left"
@@ -682,7 +688,16 @@ export default function CustomersPage() {
           </div>
         )}
 
-        {customers.length > 0 && (
+        {focusedCustomer && (
+          <button
+            onClick={showAllCustomers}
+            className="w-full rounded-md border border-line bg-bg2 px-3 py-2 text-xs text-gray-300 text-left"
+          >
+            ‹ 顧客一覧に戻る（{focusedCustomer.name} さんだけ表示中）
+          </button>
+        )}
+
+        {customers.length > 0 && !focusedCustomer && (
           <div className="relative">
             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">
               <SearchIcon />
