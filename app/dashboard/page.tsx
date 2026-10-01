@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabaseClient";
 import { useStore } from "@/lib/StoreContext";
 import { useBusinessDate } from "@/lib/BusinessDateContext";
@@ -1524,13 +1525,19 @@ function POSPageInner() {
             {activeTab.course_ends_at && <CourseTimerBadge endsAt={activeTab.course_ends_at} now={now} />}
 
             {activeTab.customer_id && activeTab.customers && (
-              <div className="rounded-lg border border-line bg-bg2 px-3 py-2 text-xs text-gray-300 space-y-0.5">
-                <div className="text-gray-500 font-bold">👤 顧客情報</div>
+              <Link
+                href={`/dashboard/customers?customer=${activeTab.customer_id}`}
+                className="block rounded-lg border border-line bg-bg2 px-3 py-2 text-xs text-gray-300 space-y-0.5"
+              >
+                <div className="flex items-center justify-between text-gray-500 font-bold">
+                  <span>👤 顧客情報</span>
+                  <span className="text-gold">詳細を開く ›</span>
+                </div>
                 {activeTab.customers.phone && <div>📞 {activeTab.customers.phone}</div>}
                 {activeTab.customers.birthday && <div>🎂 {activeTab.customers.birthday}</div>}
                 {activeTab.customers.bottle_keep && <div>🍾 {activeTab.customers.bottle_keep}</div>}
                 {activeTab.customers.memo && <div className="whitespace-pre-wrap">📝 {activeTab.customers.memo}</div>}
-              </div>
+              </Link>
             )}
 
             {notifyPermission === "default" && (

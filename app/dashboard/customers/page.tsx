@@ -289,6 +289,17 @@ export default function CustomersPage() {
     setConfirmDeleteId(null);
   }
 
+  // 伝票の「顧客情報」から ?customer=<id> 付きで来た場合は、その顧客を開いた状態で表示する
+  const [focusedFromLink, setFocusedFromLink] = useState(false);
+  useEffect(() => {
+    if (focusedFromLink || customers.length === 0) return;
+    const id = new URLSearchParams(window.location.search).get("customer");
+    setFocusedFromLink(true);
+    if (!id || !customers.some((c) => c.id === id)) return;
+    setExpandedIds((prev) => new Set(prev).add(id));
+    requestAnimationFrame(() => document.getElementById(`customer-${id}`)?.scrollIntoView({ block: "start" }));
+  }, [customers, focusedFromLink]);
+
   const filteredCustomers = useMemo(() => {
     const q = searchQuery.trim();
     if (!q) return customers;
@@ -429,7 +440,7 @@ export default function CustomersPage() {
     const primary = staffName(c.primary_staff_id);
 
     return (
-      <div key={c.id} className="rounded-xl border border-line bg-elevated overflow-hidden">
+      <div key={c.id} id={`customer-${c.id}`} className="rounded-xl border border-line bg-elevated overflow-hidden scroll-mt-20">
         <button
           onClick={() => toggleExpanded(c.id)}
           className="w-full flex items-center justify-between gap-3 px-3.5 py-3 text-left"
