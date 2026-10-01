@@ -26,6 +26,7 @@ import {
   commissionMonthNumber,
   slideScaleCommission,
   namedCustomerCommission,
+  companionAllowanceBreakdown,
   mergeStaffCommissions,
   TabItem,
   TabWithItems,
@@ -67,6 +68,7 @@ function tab(overrides: Partial<TabWithItems> = {}): TabWithItems {
     discount_percent: null,
     discount_amount: null,
     staff_id: null,
+    companion_staff_id: null,
     created_at: "2026-07-01T20:00:00+09:00",
     closed_at: "2026-07-01T23:00:00+09:00",
     tab_items: [],
@@ -117,6 +119,7 @@ function staff(overrides: Partial<Staff> = {}): Staff {
     primary_customer_guarantee_amount: null,
     primary_customer_guarantee_startup_rate: null,
     primary_customer_guarantee_startup_months: null,
+    companion_allowance_amount: null,
     ...overrides,
   };
 }
@@ -829,6 +832,28 @@ describe("namedCustomerCommission", () => {
     const expected =
       tabTotal(tabs[0].tab_items, 0.1, null, null) * 0.1 + tabTotal(tabs[1].tab_items, 0.1, null, null) * 0.21;
     expect(result.find((c) => c.staffId === "maasa")?.commission).toBeCloseTo(expected, 5);
+  });
+});
+
+describe("companionAllowanceBreakdown", () => {
+  const allowanceFor = (id: string) => (id === "a" ? 2000 : 0);
+
+  it("counts only closed tabs with a companion set, and multiplies by the per-visit allowance", () => {
+    const tabs = [
+      tab({ companion_staff_id: "a" }),
+      tab({ companion_staff_id: "a" }),
+      tab({ companion_staff_id: "b" }), // bには手当設定なし(0円)
+      tab({ companion_staff_id: null }), // 同伴なし
+      tab({ companion_staff_id: "a", closed_at: null }), // 未会計は数えない
+    ];
+    const result = companionAllowanceBreakdown(tabs, staffNameOf, allowanceFor);
+    expect(result.find((c) => c.staffId === "a")).toEqual({ staffId: "a", name: "Aさん", count: 2, amount: 4000 });
+    expect(result.find((c) => c.staffId === "b")).toEqual({ staffId: "b", name: "Bさん", count: 1, amount: 0 });
+  });
+
+  it("returns an empty list when no tab has a companion", () => {
+    const tabs = [tab({ companion_staff_id: null })];
+    expect(companionAllowanceBreakdown(tabs, staffNameOf, allowanceFor)).toEqual([]);
   });
 });
 

@@ -35,6 +35,7 @@ import {
   slideScaleCommission,
   commissionMonthNumber,
   namedCustomerCommission,
+  companionAllowanceBreakdown,
   CommissionBasis,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
@@ -173,6 +174,7 @@ export default function SettingsPage() {
   const [menuCategory, setMenuCategory] = useState("");
   const [menuIsQuickPick, setMenuIsQuickPick] = useState(false);
   const [wageDrafts, setWageDrafts] = useState<Record<string, string>>({});
+  const [companionAllowanceDrafts, setCompanionAllowanceDrafts] = useState<Record<string, string>>({});
   const [totalSalesRateDrafts, setTotalSalesRateDrafts] = useState<Record<string, string>>({});
   const [commissionRateOverrideDrafts, setCommissionRateOverrideDrafts] = useState<Record<string, string>>({});
   const [specialWageDrafts, setSpecialWageDrafts] = useState<
@@ -212,6 +214,7 @@ export default function SettingsPage() {
     personalSales: number;
     namedCustomerCommission: number; // 指名歩合（加算）
     primaryCustomerCommission: number; // 担当客の指名固定/スライド歩合
+    companionAllowance: number; // 同伴手当（クラブモードのみ）
     hourlyHours: number;
     hourlyCost: number;
     total: number;
@@ -310,6 +313,14 @@ export default function SettingsPage() {
     setStaff(staffData ?? []);
     setWageDrafts(
       Object.fromEntries((staffData ?? []).map((s) => [s.id, s.hourly_wage != null ? String(s.hourly_wage) : ""]))
+    );
+    setCompanionAllowanceDrafts(
+      Object.fromEntries(
+        ((staffData as Staff[]) ?? []).map((s) => [
+          s.id,
+          s.companion_allowance_amount != null ? String(s.companion_allowance_amount) : "",
+        ])
+      )
     );
     setTotalSalesRateDrafts(
       Object.fromEntries(
@@ -453,6 +464,13 @@ export default function SettingsPage() {
     loadData();
   }
 
+  async function saveCompanionAllowance(staffId: string) {
+    const raw = companionAllowanceDrafts[staffId] ?? "";
+    const amount = raw.trim() === "" ? null : Number(raw);
+    await supabase.from("staff").update({ companion_allowance_amount: amount }).eq("id", staffId);
+    loadData();
+  }
+
   function toggleSpecialWageOpen(id: string) {
     setSpecialWageOpenIds((prev) => {
       const next = new Set(prev);
@@ -571,14 +589,29 @@ export default function SettingsPage() {
     setMonthCommissionLoaded(true);
   }
 
+  // 店舗が半月払いでも、月間スライド歩合（commission_mode='primary_customer_slide'）のスタッフだけは
+  // 暦月1か月分の合計売上で歩合の閾値を判定する仕組みのため、常に「対象月」ピッカーを使う
+  function effectivePayCycleFor(staffId: string): PayCycle {
+    const s = staff.find((x) => x.id === staffId);
+    if (payCycle === "semimonthly" && s?.commission_mode === "primary_customer_slide") return "monthly";
+    return payCycle;
+  }
+
   // 支払いサイクルに応じて、明細作成の対象期間ピッカーのデフォルト値を返す
-  // （月払い="YYYY-MM"、週払い/日払い="YYYY-MM-DD"。締め後に作るのが普通なので、直近の完了済み期間をデフォルトにする）
-  function defaultPayslipPeriod() {
+  // （月払い="YYYY-MM"、半月払い="YYYY-MM-H1"/"YYYY-MM-H2"、週払い/日払い="YYYY-MM-DD"。
+  // 締め後に作るのが普通なので、直近の完了済み期間をデフォルトにする）
+  function defaultPayslipPeriod(cycle: PayCycle) {
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
-    if (payCycle === "monthly") {
+    if (cycle === "monthly") {
       const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+    }
+    if (cycle === "semimonthly") {
+      // 16日以降なら今月前半(1〜15日)、15日以前なら前月後半(16〜末日)が直近の完了済み期間
+      if (now.getDate() >= 16) return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-H1`;
+      const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-H2`;
     }
     const d = new Date(now);
     d.setDate(d.getDate() - 1);
@@ -586,15 +619,25 @@ export default function SettingsPage() {
   }
 
   // 支払いサイクルとピッカーの入力値から、実際に集計する日付範囲と明細の表示ラベルを組み立てる
-  function payslipPeriodRange(period: string): { start: string; end: string; label: string } {
+  function payslipPeriodRange(period: string, cycle: PayCycle): { start: string; end: string; label: string } {
     const pad = (n: number) => String(n).padStart(2, "0");
-    if (payCycle === "monthly") {
+    if (cycle === "monthly") {
       const [y, m] = period.split("-").map(Number);
       const start = `${period}-01`;
       const end = `${period}-${pad(new Date(y, m, 0).getDate())}`;
       return { start, end, label: `${y}年${m}月分` };
     }
-    if (payCycle === "weekly") {
+    if (cycle === "semimonthly") {
+      const [yStr, mStr, half] = period.split("-");
+      const y = Number(yStr);
+      const m = Number(mStr);
+      if (half === "H2") {
+        const end = `${yStr}-${mStr}-${pad(new Date(y, m, 0).getDate())}`;
+        return { start: `${yStr}-${mStr}-16`, end, label: `${y}年${m}月後半（16〜末日）分` };
+      }
+      return { start: `${yStr}-${mStr}-01`, end: `${yStr}-${mStr}-15`, label: `${y}年${m}月前半（1〜15日）分` };
+    }
+    if (cycle === "weekly") {
       const startDate = new Date(`${period}T12:00:00`);
       const endDate = new Date(startDate);
       endDate.setDate(endDate.getDate() + 6);
@@ -611,7 +654,7 @@ export default function SettingsPage() {
     if (!s) return;
     setGeneratingPayslip(true);
 
-    const { start, end, label } = payslipPeriodRange(payslipPeriod);
+    const { start, end, label } = payslipPeriodRange(payslipPeriod, effectivePayCycleFor(payslipStaffId));
 
     const [{ data: tabsData }, { data: attData }, { data: ruleRows }, { data: customersData }] = await Promise.all([
       supabase
@@ -705,6 +748,16 @@ export default function SettingsPage() {
       }
     }
 
+    // 同伴手当：この来店を同伴したスタッフとして指名された回数×本人の同伴手当単価（クラブモードのみ）
+    const companionAllowance =
+      storeMode === "club"
+        ? companionAllowanceBreakdown(
+            (tabsData as TabWithItems[]) ?? [],
+            nameOf,
+            (id) => staff.find((x) => x.id === id)?.companion_allowance_amount ?? 0
+          ).find((c) => c.staffId === payslipStaffId)?.amount ?? 0
+        : 0;
+
     const base = s.base_salary ?? 0;
     const allowance = s.special_allowance ?? 0;
     const hourlyHours = hourly?.hours ?? 0;
@@ -719,9 +772,10 @@ export default function SettingsPage() {
       personalSales,
       namedCustomerCommission: namedCommission,
       primaryCustomerCommission,
+      companionAllowance,
       hourlyHours,
       hourlyCost,
-      total: base + allowance + commission + namedCommission + primaryCustomerCommission + hourlyCost,
+      total: base + allowance + commission + namedCommission + primaryCustomerCommission + companionAllowance + hourlyCost,
     });
     setGeneratingPayslip(false);
     setShowPayslipPicker(false);
@@ -1081,6 +1135,30 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {storeMode === "club" && (
+          <div className="flex items-center gap-2">
+            <input
+              value={companionAllowanceDrafts[s.id] ?? ""}
+              onChange={(e) =>
+                setCompanionAllowanceDrafts((d) => ({ ...d, [s.id]: e.target.value }))
+              }
+              placeholder="同伴手当(任意・1回あたり)"
+              inputMode="numeric"
+              className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1 text-sm"
+            />
+            <button
+              onClick={() => saveCompanionAllowance(s.id)}
+              disabled={
+                (companionAllowanceDrafts[s.id] ?? "") ===
+                (s.companion_allowance_amount != null ? String(s.companion_allowance_amount) : "")
+              }
+              className="text-xs rounded-md border border-line px-2 py-1.5 text-gray-300 disabled:opacity-40 shrink-0"
+            >
+              保存
+            </button>
+          </div>
+        )}
+
         {storeMode === "club" && renderPrimaryCustomerPanel(s)}
       </div>
     );
@@ -1131,8 +1209,12 @@ export default function SettingsPage() {
             >
               <option value="standard">標準（通常の按分歩合のみ）</option>
               <option value="primary_customer_flat">指名固定歩合（常に同じ率）</option>
-              <option value="primary_customer_slide" disabled={payCycle !== "monthly"}>
-                指名スライド歩合（月間売上に応じた率{payCycle !== "monthly" ? "・月払いの店舗のみ選択可" : ""}）
+              <option
+                value="primary_customer_slide"
+                disabled={payCycle !== "monthly" && payCycle !== "semimonthly"}
+              >
+                指名スライド歩合（月間売上に応じた率
+                {payCycle !== "monthly" && payCycle !== "semimonthly" ? "・月払い／半月払いの店舗のみ選択可" : ""}）
               </option>
             </select>
 
@@ -1390,12 +1472,18 @@ export default function SettingsPage() {
             <select
               value={payCycleDraft}
               onChange={(e) => setPayCycleDraft(e.target.value as PayCycle)}
-              className="w-32 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+              className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
             >
               <option value="monthly">月払い</option>
+              <option value="semimonthly">半月払い（1〜15日／16〜末日）</option>
               <option value="weekly">週払い</option>
               <option value="daily">日払い</option>
             </select>
+            {payCycleDraft === "semimonthly" && (
+              <div className="text-xs text-gray-500 mt-1">
+                月間スライド歩合（担当客の指名スライド歩合）のスタッフは、このスタッフだけ暦月1か月分でまとめて計算されます
+              </div>
+            )}
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">
@@ -2016,8 +2104,9 @@ export default function SettingsPage() {
             {staff.length > 0 && (
               <button
                 onClick={() => {
-                  setPayslipStaffId(staff[0].id);
-                  setPayslipPeriod(defaultPayslipPeriod());
+                  const firstStaffId = staff[0].id;
+                  setPayslipStaffId(firstStaffId);
+                  setPayslipPeriod(defaultPayslipPeriod(effectivePayCycleFor(firstStaffId)));
                   setShowPayslipPicker(true);
                 }}
                 className="w-full rounded-xl border border-dashed border-gold/50 text-gold py-3 text-sm font-bold"
@@ -2196,7 +2285,11 @@ export default function SettingsPage() {
               <label className="block text-xs text-gray-400 mb-1">スタッフ</label>
               <select
                 value={payslipStaffId}
-                onChange={(e) => setPayslipStaffId(e.target.value)}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setPayslipStaffId(id);
+                  setPayslipPeriod(defaultPayslipPeriod(effectivePayCycleFor(id)));
+                }}
                 className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
               >
                 {staff.map((s) => (
@@ -2206,20 +2299,68 @@ export default function SettingsPage() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">
-                {payCycle === "monthly" ? "対象月" : payCycle === "weekly" ? "週の開始日" : "対象日"}
-              </label>
-              <input
-                type={payCycle === "monthly" ? "month" : "date"}
-                value={payslipPeriod}
-                onChange={(e) => setPayslipPeriod(e.target.value)}
-                className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
-              />
-              {payCycle === "weekly" && (
-                <div className="text-xs text-gray-500 mt-1">この日から7日間が対象になります</div>
-              )}
-            </div>
+            {(() => {
+              const cycle = effectivePayCycleFor(payslipStaffId);
+              const [periodMonth, periodHalf] = payslipPeriod.split(/-(H[12])$/);
+              return (
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    {cycle === "monthly"
+                      ? "対象月"
+                      : cycle === "semimonthly"
+                      ? "対象期間"
+                      : cycle === "weekly"
+                      ? "週の開始日"
+                      : "対象日"}
+                  </label>
+                  {cycle === "semimonthly" ? (
+                    <div className="space-y-2">
+                      <input
+                        type="month"
+                        value={periodMonth}
+                        onChange={(e) => setPayslipPeriod(`${e.target.value}-${periodHalf ?? "H1"}`)}
+                        className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPayslipPeriod(`${periodMonth}-H1`)}
+                          className={`flex-1 rounded-md border px-3 py-1.5 text-sm ${
+                            periodHalf === "H1" ? "border-gold text-gold bg-gold/10" : "border-line text-gray-300"
+                          }`}
+                        >
+                          前半（1〜15日）
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPayslipPeriod(`${periodMonth}-H2`)}
+                          className={`flex-1 rounded-md border px-3 py-1.5 text-sm ${
+                            periodHalf === "H2" ? "border-gold text-gold bg-gold/10" : "border-line text-gray-300"
+                          }`}
+                        >
+                          後半（16〜末日）
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <input
+                      type={cycle === "monthly" ? "month" : "date"}
+                      value={payslipPeriod}
+                      onChange={(e) => setPayslipPeriod(e.target.value)}
+                      className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                    />
+                  )}
+                  {cycle === "weekly" && (
+                    <div className="text-xs text-gray-500 mt-1">この日から7日間が対象になります</div>
+                  )}
+                  {payCycle === "semimonthly" && cycle === "monthly" && (
+                    <div className="text-xs text-gray-500 mt-1">
+                      このスタッフは月間スライド歩合のため、暦月1か月分でまとめて計算します
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="flex gap-2">
               <button
                 onClick={() => setShowPayslipPicker(false)}
@@ -2313,6 +2454,14 @@ export default function SettingsPage() {
                       <td className="py-2.5">担当客の指名歩合</td>
                       <td className="py-2.5 text-right font-mono">
                         ¥{Math.round(payslipData.primaryCustomerCommission).toLocaleString()}
+                      </td>
+                    </tr>
+                  )}
+                  {payslipData.companionAllowance !== 0 && (
+                    <tr className="border-b border-gray-200">
+                      <td className="py-2.5">同伴手当</td>
+                      <td className="py-2.5 text-right font-mono">
+                        ¥{Math.round(payslipData.companionAllowance).toLocaleString()}
                       </td>
                     </tr>
                   )}

@@ -832,6 +832,12 @@ function POSPageInner() {
     loadData();
   }
 
+  async function setTabCompanion(staffId: string | null) {
+    if (!activeTab) return;
+    await supabase.from("tabs").update({ companion_staff_id: staffId }).eq("id", activeTab.id);
+    loadData();
+  }
+
   function reinsertTabItem(tabId: string, item: TabItem) {
     enqueue(async () => {
       const { data } = await supabase
@@ -1667,6 +1673,30 @@ function POSPageInner() {
               </div>
               <div className="text-sm text-gray-400 mt-2">
                 この伝票の売上全体が、選択したスタッフの歩合給の対象になります（もう一度タップで解除、会計済みでも変更できます）
+              </div>
+            </div>
+          )}
+
+          {storeMode === "club" && staff.length > 0 && (
+            <div className="rounded-xl border border-gold/50 bg-gold/10 p-4">
+              <SectionHeader icon={<PeopleSectionIcon />}>同伴スタッフ（同伴手当の対象）</SectionHeader>
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {staff.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => setTabCompanion(activeTab.companion_staff_id === s.id ? null : s.id)}
+                    className={`shrink-0 rounded-full px-3 py-2 text-sm border ${
+                      activeTab.companion_staff_id === s.id
+                        ? "bg-gold text-bg border-gold"
+                        : "bg-elevated text-gray-300 border-line"
+                    }`}
+                  >
+                    🤝 {s.name}
+                  </button>
+                ))}
+              </div>
+              <div className="text-sm text-gray-400 mt-2">
+                このお客様を同伴して来店したスタッフを選びます（担当スタッフとは別。もう一度タップで解除）
               </div>
             </div>
           )}

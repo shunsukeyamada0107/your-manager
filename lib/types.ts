@@ -23,6 +23,7 @@ export type Staff = {
   primary_customer_guarantee_amount: number | null; // primary_customer_slide用の月間保証額
   primary_customer_guarantee_startup_rate: number | null; // 起算から一定月数だけ保証額に上乗せする率
   primary_customer_guarantee_startup_months: number | null; // 上記の上乗せが適用される月数
+  companion_allowance_amount: number | null; // 同伴1回あたりの手当額（クラブモード用）。nullは手当なし
 };
 
 export type Customer = {
@@ -95,6 +96,7 @@ export type Tab = {
   discount_percent: number | null;
   discount_amount: number | null;
   staff_id: string | null; // この伝票の担当スタッフ（歩合給の対象）
+  companion_staff_id: string | null; // この来店を同伴したスタッフ（歩合対象のstaff_idとは別軸。クラブモード用）
   created_at: string; // 来店
   closed_at: string | null; // 退店・会計
 };
@@ -174,7 +176,7 @@ export const DEFAULT_ROUND_UNIT = 100; // 会計時に切り上げる単位（�
 
 export type CommissionScheme = "simple" | "drink_back";
 
-export type PayCycle = "monthly" | "weekly" | "daily";
+export type PayCycle = "monthly" | "semimonthly" | "weekly" | "daily"; // semimonthly=半月払い（1〜15日／16〜末日の2期間に分けて支給）
 
 export type StoreMode = "bar" | "club"; // 店舗の運用モード。club=クラブモード（顧客の事前登録必須）
 
@@ -753,6 +755,29 @@ export function namedCustomerCommission(
       map[rule.staff_id].salesWithTax += amount;
       map[rule.staff_id].commission += amount * rate;
     });
+  });
+  return Object.values(map);
+}
+
+export type CompanionStats = { staffId: string; name: string; count: number; amount: number };
+
+// 同伴手当：会計済み（closed_atがある）伝票のうち、companion_staff_idが設定されているものを
+// 同伴したスタッフごとに数え、スタッフごとの「1回あたりの同伴手当額」を掛けて金額にする。
+// 同伴（来店のきっかけを作った人）は、その伝票を実際に接客したスタッフ（staff_id）とは独立した別軸の集計
+export function companionAllowanceBreakdown(
+  tabs: TabWithItems[],
+  staffNameOf: (staffId: string | null) => string,
+  allowanceAmountFor: (staffId: string) => number
+): CompanionStats[] {
+  const map: Record<string, CompanionStats> = {};
+  tabs.forEach((t) => {
+    if (!t.closed_at || !t.companion_staff_id) return;
+    const id = t.companion_staff_id;
+    if (!map[id]) map[id] = { staffId: id, name: staffNameOf(id), count: 0, amount: 0 };
+    map[id].count += 1;
+  });
+  Object.values(map).forEach((c) => {
+    c.amount = c.count * allowanceAmountFor(c.staffId);
   });
   return Object.values(map);
 }

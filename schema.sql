@@ -42,7 +42,7 @@ create table stores (
   owner_pin                 text, -- 設定タブの「オーナー専用」情報を開くための暗証番号。ログインアカウントは店舗で共有するため別途用意（DB上は平文。閲覧はRLSで店舗メンバーのみに制限されるが、あくまで同じ端末を使うスタッフからオーナー情報を隠すためのUI上のロックであり、暗号強度のセキュリティではない）
   report_pin_required       boolean not null default false, -- 集計タブを開く際にオーナー専用の暗証番号(owner_pin)入力を必須にするか
   settings_pin_required     boolean not null default false, -- 設定タブを開く際にオーナー専用の暗証番号(owner_pin)入力を必須にするか
-  pay_cycle                 text not null default 'monthly' check (pay_cycle in ('monthly','weekly','daily')), -- 給与の支払いサイクル（monthly=月払い、weekly=週払い、daily=日払い）。給与明細作成時の対象期間の選び方に反映される
+  pay_cycle                 text not null default 'monthly' check (pay_cycle in ('monthly','semimonthly','weekly','daily')), -- 給与の支払いサイクル（monthly=月払い、semimonthly=半月払い[1〜15日／16〜末日]、weekly=週払い、daily=日払い）。給与明細作成時の対象期間の選び方に反映される
   commission_tax_basis      text not null default 'with_tax' check (commission_tax_basis in ('with_tax','pre_tax')), -- 歩合の計算を消費税込みの金額でやるか(with_tax)、消費税抜きの小計でやるか(pre_tax)
   slide_scale_tiers         jsonb not null default '[]'::jsonb, -- 月間個人売上に対する非マージナル方式のスライド歩合ティア表。
                                                                   -- [{"min_amount":300000,"rate":0.22}, ...] の形で、
@@ -111,6 +111,7 @@ create table staff (
   primary_customer_guarantee_startup_rate numeric, -- 起算からprimary_customer_guarantee_startup_monthsヶ月だけ、
                                                      -- 保証額に「本人の担当客売上(出勤日分)×この率」を上乗せする率
   primary_customer_guarantee_startup_months integer, -- 上記の上乗せが適用される月数（例: 3）
+  companion_allowance_amount numeric, -- 同伴1回あたりの手当額（クラブモード用）。nullは手当なし（0円）扱い
   created_at          timestamptz not null default now()
 );
 
@@ -188,6 +189,7 @@ create table tabs (
   discount_percent numeric,                             -- 割引率（例: 30 = 30%OFF、任意）
   discount_amount  numeric,                             -- 自由入力の値引き額（円、任意）
   staff_id        uuid references staff(id) on delete set null, -- この伝票の担当スタッフ（歩合給の対象）
+  companion_staff_id uuid references staff(id) on delete set null, -- この来店を同伴したスタッフ（歩合対象の担当staff_idとは別軸。クラブモード用）
   created_at      timestamptz not null default now(),  -- 来店
   closed_at       timestamptz                          -- 退店・会計
 );
