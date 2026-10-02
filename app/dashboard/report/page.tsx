@@ -943,18 +943,19 @@ export default function ReportPage() {
         { width: 13 },
         { width: 10 },
         { width: 10 },
+        { width: 13 },
       ];
       const titleRow2 = monthSheet.addRow(["月", storeName ?? ""]);
       titleRow2.font = { bold: true, size: 13, color: { argb: GOLD } };
-      styleHeaderRow(monthSheet.addRow(["日", "売上高(税込)", "原価", "粗利益", "組数", "人数"]));
+      styleHeaderRow(monthSheet.addRow(["日", "売上高(税込)", "原価", "粗利益", "組数", "人数", "カード"]));
 
       for (let day = 1; day <= daysInMonth; day++) {
         const date = `${monthStart.slice(0, 8)}${String(day).padStart(2, "0")}`;
         const r = rowByDate.get(date);
         const sales = r ? Math.round(r.total) : 0;
         const cost = r ? Math.round(r.expense) : 0;
-        const row = monthSheet.addRow([day, sales, cost, sales - cost, r?.tabCount ?? 0, r?.guestCount ?? 0]);
-        [2, 3, 4].forEach((c) => (row.getCell(c).numFmt = '"¥"#,##0'));
+        const row = monthSheet.addRow([day, sales, cost, sales - cost, r?.tabCount ?? 0, r?.guestCount ?? 0, r ? Math.round(r.card) : 0]);
+        [2, 3, 4, 7].forEach((c) => (row.getCell(c).numFmt = '"¥"#,##0'));
         styleDataRow(row, day % 2 === 0);
       }
       const ledgerTotalSales = Math.round(monthTotal.total);
@@ -966,13 +967,14 @@ export default function ReportPage() {
         ledgerTotalSales - ledgerTotalCost,
         monthTotal.tabCount,
         monthTotal.guestCount,
+        Math.round(monthTotal.card),
       ]);
       totalRow.font = { bold: true };
       totalRow.eachCell((cell) => {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GOLD } };
         cell.font = { bold: true, color: { argb: DARK } };
       });
-      [2, 3, 4].forEach((c) => (totalRow.getCell(c).numFmt = '"¥"#,##0'));
+      [2, 3, 4, 7].forEach((c) => (totalRow.getCell(c).numFmt = '"¥"#,##0'));
 
       // --- 人件費（人別・今月）：月次シートとは別のシートに独立させる ---
       const monthLaborSheet = wb.addWorksheet(`人件費(${monthLabel})`);
@@ -1302,8 +1304,10 @@ export default function ReportPage() {
             <span className="text-gray-300 font-bold">売上－経費</span>
             <span className="text-right text-[#6FB3E0] font-bold">{yen(monthTotal.total - monthTotal.expense)}</span>
             <span className="col-span-2 text-right text-xs text-gray-500 -mt-0.5">（消費税 {yen(monthTotal.tax)}）</span>
-            <span className="text-gray-400 mt-2">平均滞在時間</span>
-            <span className="text-right mt-2">{monthAvgStay != null ? formatMinutes(monthAvgStay) : "—"}</span>
+            <span className="text-gray-400 mt-2">カード</span>
+            <span className="text-right mt-2">{yen(monthTotal.card)}</span>
+            <span className="text-gray-400">平均滞在時間</span>
+            <span className="text-right">{monthAvgStay != null ? formatMinutes(monthAvgStay) : "—"}</span>
           </div>
         </div>
 
