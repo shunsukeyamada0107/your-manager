@@ -28,6 +28,13 @@ import {
   namedCustomerCommission,
   companionAllowanceBreakdown,
   mergeStaffCommissions,
+  snackSalesBackRate,
+  snackPayBreakdown,
+  snackDeductions,
+  snackCompanionCount,
+  normalizeSnackPaySettings,
+  DEFAULT_SNACK_PAY_SETTINGS,
+  MenuItem,
   TabItem,
   TabWithItems,
   Attendance,
@@ -877,5 +884,106 @@ describe("mergeStaffCommissions", () => {
     const result = mergeStaffCommissions(groupA, groupB);
     expect(result.find((c) => c.staffId === "a")?.commission).toBe(1500);
     expect(result.find((c) => c.staffId === "b")?.commission).toBe(300);
+  });
+});
+
+describe("snack mode pay", () => {
+  function menu(overrides: Partial<MenuItem>): MenuItem {
+    return {
+      id: Math.random().toString(36),
+      store_id: "store-1",
+      name: "x",
+      price: 0,
+      course_minutes: null,
+      active: true,
+      sort_order: 0,
+      is_cast_drink: false,
+      category: null,
+      is_quick_pick: false,
+      cost_price: null,
+      snack_item_kind: null,
+      ...overrides,
+    };
+  }
+  const menus = [
+    menu({ name: "SET", price: 13000 }),
+    menu({ name: "ヴーヴ", price: 30000, cost_price: 8000, snack_item_kind: "bottle" }),
+    menu({ name: "指名料", price: 3000, snack_item_kind: "nomination" }),
+  ];
+  const customers = [
+    { id: "c-a", primary_staff_id: "a" },
+    { id: "c-b", primary_staff_id: "b" },
+    { id: "c-shop", primary_staff_id: null },
+  ];
+  const s = DEFAULT_SNACK_PAY_SETTINGS;
+
+  it("rate goes up 1% every 100,000 with no cap, applied to the whole amount", () => {
+    expect(snackSalesBackRate(99999, 100000, 0.01)).toBe(0);
+    expect(snackSalesBackRate(100000, 100000, 0.01)).toBeCloseTo(0.01);
+    expect(snackSalesBackRate(336000, 100000, 0.01)).toBeCloseTo(0.03);
+    expect(snackSalesBackRate(1500000, 100000, 0.01)).toBeCloseTo(0.15);
+  });
+
+  it("matches the worked example sent to the store (sales 350k, bottle cost 8k, companion 6k → 3%)", () => {
+    const tabs = [
+      tab({
+        customer_id: "c-a",
+        staff_id: "a",
+        tab_items: [
+          item({ name: "SET", price: 13000, qty: 24 }), // 312,000
+          item({ name: "ヴーヴ", price: 30000 }), // 30,000（原価8,000）
+          item({ name: "指名料", price: 3000 }), // 売上には含めず全額バック
+          item({ name: "ソフト", price: 8000, source: "manual" }), // 8,000
+        ],
+      }),
+      // 店口座の客が a にボトルを下ろした → aに10%
+      tab({ customer_id: "c-shop", tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "a" })] }),
+      // bの指名客 → aの売上には入らない
+      tab({ customer_id: "c-b", tab_items: [item({ name: "SET", price: 13000 })] }),
+      // 未会計は数えない
+      tab({ customer_id: "c-a", closed_at: null, tab_items: [item({ name: "SET", price: 13000 })] }),
+    ];
+    const r = snackPayBreakdown(tabs, customers, menus, s, "a", 6000);
+    expect(r.nominatedSales).toBe(350000);
+    expect(r.bottleCost).toBe(8000);
+    expect(r.companionDeduction).toBe(6000);
+    expect(r.salesBackBase).toBe(336000);
+    expect(r.salesBack).toBeCloseTo(10080);
+    expect(r.bottleBack).toBeCloseTo(3000);
+    expect(r.nominationBack).toBe(3000);
+  });
+
+  it("a bottle a's customer gives to b: b gets 10%, a's sales include it only when the option is on", () => {
+    const tabs = [tab({ customer_id: "c-a", tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "b" })] })];
+    expect(snackPayBreakdown(tabs, customers, menus, s, "b", 0).bottleBack).toBeCloseTo(3000);
+    expect(snackPayBreakdown(tabs, customers, menus, s, "a", 0).nominatedSales).toBe(30000);
+    const off = { ...s, includeBottleToOthersInSales: false };
+    expect(snackPayBreakdown(tabs, customers, menus, off, "a", 0).nominatedSales).toBe(0);
+  });
+
+  it("counts companions from the 同伴 menu item (falling back to the companion button) without double counting", () => {
+    const m = [...menus, menu({ name: "同伴", price: 3000, snack_item_kind: "companion" })];
+    const tabs = [
+      tab({ customer_id: "c-a", tab_items: [item({ name: "同伴", price: 3000 })] }), // 担当未指定→指名の子a
+      tab({ customer_id: "c-shop", tab_items: [item({ name: "同伴", price: 3000, staff_id: "b" })] }), // b
+      tab({ companion_staff_id: "a", tab_items: [item({ name: "同伴", price: 3000 })] }), // ボタンと品目の両方→1回
+      tab({ companion_staff_id: "a", tab_items: [item({ name: "SET", price: 13000 })] }), // ボタンだけ→1回
+    ];
+    expect(snackCompanionCount(tabs, customers, m, "a")).toBe(3);
+    expect(snackCompanionCount(tabs, customers, m, "b")).toBe(1);
+  });
+
+  it("deducts the business card fee first, then 10% of the rest", () => {
+    const d = snackDeductions(319080, s);
+    expect(d.businessCardFee).toBe(3000);
+    expect(d.deduction).toBeCloseTo(31608);
+    expect(d.net).toBeCloseTo(284472);
+  });
+
+  it("fills missing settings with defaults and ignores wrong types", () => {
+    const n = normalizeSnackPaySettings({ stepRate: 0.02, deductBottleCost: "yes" });
+    expect(n.stepRate).toBe(0.02);
+    expect(n.deductBottleCost).toBe(true);
+    expect(normalizeSnackPaySettings(null)).toEqual(DEFAULT_SNACK_PAY_SETTINGS);
   });
 });

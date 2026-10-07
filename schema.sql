@@ -38,6 +38,7 @@ create table stores (
   enable_name_search        boolean not null default true,  -- 伝票を作る画面で、同じ名前の過去の伝票を検索表示するか
   name_input_mode           text not null default 'keyboard' check (name_input_mode in ('keyboard','kana_keypad')), -- 伝票の名前欄の入力方法（keyboard=通常のキーボード、kana_keypad=カタカナ専用ボタン）
   store_mode                text not null default 'bar' check (store_mode in ('bar','club')), -- 店舗の運用モード（bar=通常のバー運用、club=クラブモード。伝票作成前に顧客の事前登録を必須にする等の挙動を切り替える）
+  snack_pay_settings        jsonb not null default '{}'::jsonb, -- クラブモードの給与計算方法と設定（method=1:通常、2:指名売上の段階バック。売上バックの段階率・酒代/同伴代の差し引き・ボトルバック率・指名料バック・名刺代・控除率）。未設定の項目はアプリ側の既定値を使う
   organization_id           uuid references organizations(id) on delete set null, -- 複数店舗を運営する組織に属する場合
   owner_pin                 text, -- 設定タブの「オーナー専用」情報を開くための暗証番号。ログインアカウントは店舗で共有するため別途用意（DB上は平文。閲覧はRLSで店舗メンバーのみに制限されるが、あくまで同じ端末を使うスタッフからオーナー情報を隠すためのUI上のロックであり、暗号強度のセキュリティではない）
   report_pin_required       boolean not null default false, -- 集計タブを開く際にオーナー専用の暗証番号(owner_pin)入力を必須にするか
@@ -167,6 +168,8 @@ create table menu_items (
   is_cast_drink   boolean not null default false, -- ドリンクバック制の対象（お客様がキャストに奢るドリンク）
   category        text,              -- 伝票画面でのカテゴリタブ分け。null=「その他」扱い
   is_quick_pick   boolean not null default false, -- よく出る商品として伝票画面の最上部に固定表示
+  cost_price      numeric,           -- 原価（給与計算方法2で、キャスト売上バックの元から酒代として引く）。null=原価なし
+  snack_item_kind text check (snack_item_kind in ('bottle','nomination','companion')), -- 給与計算方法2での扱い（bottle=ボトル・抜き物、nomination=指名料、companion=同伴料。同伴料は品目の担当の同伴回数として数える）。null=通常
   created_at      timestamptz not null default now()
 );
 

@@ -37,9 +37,25 @@ import {
   namedCustomerCommission,
   companionAllowanceBreakdown,
   CommissionBasis,
+  SnackPaySettings,
+  SnackItemKind,
+  normalizeSnackPaySettings,
+  snackPayBreakdown,
+  snackDeductions,
+  snackCompanionCount,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
 import { StoreTheme } from "@/lib/theme";
+
+// クラブモードの給与計算方法（番号で選ぶ。増やす場合はここに追加し、給与明細の計算に分岐を足す）
+const PAY_METHODS = [
+  { id: 1, label: "通常", note: "担当した伝票の売上 × 歩合率（スタッフごとの指名歩合・スライド歩合もここ）" },
+  {
+    id: 2,
+    label: "指名売上の段階バック",
+    note: "指名のお客様の売上に段階率＋ボトルバック・指名料・同伴、名刺代と控除を差し引き",
+  },
+];
 
 const CUTOFF_HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => i);
 
@@ -218,6 +234,8 @@ export default function SettingsPage() {
     hourlyHours: number;
     hourlyCost: number;
     total: number;
+    // 給与計算方法2のみ：売上バックの内訳と、名刺代・控除後の差引支給額
+    snack: (ReturnType<typeof snackPayBreakdown> & ReturnType<typeof snackDeductions>) | null;
   } | null>(null);
 
   const [storeNameDraft, setStoreNameDraft] = useState(storeName ?? "");
@@ -229,6 +247,11 @@ export default function SettingsPage() {
   const [accentColorDraft, setAccentColorDraft] = useState(accentColor);
   const [themeDraft, setThemeDraft] = useState<StoreTheme>(theme);
   const [storeModeDraft, setStoreModeDraft] = useState<StoreMode>(storeMode);
+  // クラブモードの給与計算方法（1=通常、2=指名売上の段階バック）とその設定（stores.snack_pay_settings）。他の店舗設定とは別に読み込む
+  const [snackSettings, setSnackSettings] = useState<SnackPaySettings>(normalizeSnackPaySettings(null));
+  const [snackSettingsDraft, setSnackSettingsDraft] = useState<SnackPaySettings>(normalizeSnackPaySettings(null));
+  const [menuCostDrafts, setMenuCostDrafts] = useState<Record<string, string>>({});
+  const isTieredPayMethod = storeMode === "club" && snackSettings.method === 2;
   const [showInsightsDraft, setShowInsightsDraft] = useState(showInsights);
   const [acceptsCardDraft, setAcceptsCardDraft] = useState(acceptsCard);
   const [acceptsPaypayDraft, setAcceptsPaypayDraft] = useState(acceptsPaypay);
@@ -398,6 +421,21 @@ export default function SettingsPage() {
     loadData();
   }, [loadData]);
 
+  // クラブモードの店舗だけ給与計算方法を読み込む（列が無い環境でも他の画面に影響しないよう別クエリにする）
+  useEffect(() => {
+    if (!storeId || storeMode !== "club") return;
+    supabase
+      .from("stores")
+      .select("snack_pay_settings")
+      .eq("id", storeId)
+      .maybeSingle()
+      .then(({ data }) => {
+        const loaded = normalizeSnackPaySettings((data as { snack_pay_settings?: unknown } | null)?.snack_pay_settings);
+        setSnackSettings(loaded);
+        setSnackSettingsDraft(loaded);
+      });
+  }, [storeId, storeMode]);
+
   async function addMenuItem() {
     if (!storeId || !menuName.trim() || !menuPrice.trim()) return;
     const nextSortOrder = menu.reduce((max, m) => Math.max(max, m.sort_order), 0) + 1;
@@ -422,6 +460,22 @@ export default function SettingsPage() {
 
   async function toggleCastDrink(m: MenuItem) {
     await supabase.from("menu_items").update({ is_cast_drink: !m.is_cast_drink }).eq("id", m.id);
+    loadData();
+  }
+
+  async function updateMenuSnackKind(m: MenuItem, kind: SnackItemKind | null) {
+    await supabase.from("menu_items").update({ snack_item_kind: kind }).eq("id", m.id);
+    loadData();
+  }
+
+  async function saveMenuCost(m: MenuItem) {
+    const raw = (menuCostDrafts[m.id] ?? "").trim();
+    await supabase.from("menu_items").update({ cost_price: raw === "" ? null : Number(raw) }).eq("id", m.id);
+    setMenuCostDrafts((d) => {
+      const next = { ...d };
+      delete next[m.id];
+      return next;
+    });
     loadData();
   }
 
@@ -702,8 +756,10 @@ export default function SettingsPage() {
       ownerOf,
       roundUnit
     ).find((c) => c.staffId === payslipStaffId);
-    const commission = myCommission?.commission ?? 0;
-    const personalSales = myCommission?.salesWithTax ?? 0;
+    const isSnack = isTieredPayMethod;
+    // 給与計算方法2は通常の按分歩合を使わず、下の専用計算（売上バック・ボトルバック・指名料）に置き換える
+    const commission = isSnack ? 0 : myCommission?.commission ?? 0;
+    const personalSales = isSnack ? 0 : myCommission?.salesWithTax ?? 0;
     const hourly = hourlyLaborBreakdown((attData as Attendance[]) ?? [], nameOf)[0] ?? null;
 
     // 仕組み1：指名歩合（実際の接客者とは別に、指名された分だけ加算）
@@ -748,9 +804,12 @@ export default function SettingsPage() {
       }
     }
 
-    // 同伴手当：この来店を同伴したスタッフとして指名された回数×本人の同伴手当単価（クラブモードのみ）
-    const companionAllowance =
-      storeMode === "club"
+    // 同伴手当：この来店を同伴したスタッフとして指名された回数×本人の同伴手当単価（クラブモードのみ）。
+    // 給与計算方法2は伝票の同伴料の品目でも数える（品目が無い伝票は同伴ボタンで数える）
+    const companionAllowance = isTieredPayMethod
+      ? snackCompanionCount((tabsData as TabWithItems[]) ?? [], (customersData as Customer[]) ?? [], menu, payslipStaffId) *
+        (s.companion_allowance_amount ?? 0)
+      : storeMode === "club"
         ? companionAllowanceBreakdown(
             (tabsData as TabWithItems[]) ?? [],
             nameOf,
@@ -762,6 +821,27 @@ export default function SettingsPage() {
     const allowance = s.special_allowance ?? 0;
     const hourlyHours = hourly?.hours ?? 0;
     const hourlyCost = hourly?.cost ?? 0;
+
+    const snackPay = isSnack
+      ? snackPayBreakdown(
+          (tabsData as TabWithItems[]) ?? [],
+          (customersData as Customer[]) ?? [],
+          menu,
+          snackSettings,
+          payslipStaffId,
+          companionAllowance,
+          taxRate
+        )
+      : null;
+    const gross =
+      base +
+      allowance +
+      commission +
+      namedCommission +
+      primaryCustomerCommission +
+      companionAllowance +
+      hourlyCost +
+      (snackPay ? snackPay.salesBack + snackPay.bottleBack + snackPay.nominationBack : 0);
 
     setPayslipData({
       staffName: s.name,
@@ -775,7 +855,8 @@ export default function SettingsPage() {
       companionAllowance,
       hourlyHours,
       hourlyCost,
-      total: base + allowance + commission + namedCommission + primaryCustomerCommission + companionAllowance + hourlyCost,
+      total: gross,
+      snack: snackPay ? { ...snackPay, ...snackDeductions(gross, snackSettings) } : null,
     });
     setGeneratingPayslip(false);
     setShowPayslipPicker(false);
@@ -925,8 +1006,10 @@ export default function SettingsPage() {
         name_input_mode: nameInputModeDraft,
         pay_cycle: payCycleDraft,
         commission_tax_basis: commissionTaxBasisDraft,
+        ...(storeModeDraft === "club" ? { snack_pay_settings: snackSettingsDraft } : {}),
       })
       .eq("id", storeId);
+    if (storeModeDraft === "club") setSnackSettings(snackSettingsDraft);
     setSavingStoreSettings(false);
     reload();
   }
@@ -947,6 +1030,94 @@ export default function SettingsPage() {
   const ineligibleStaff = staff.filter((s) => !s.commission_eligible);
 
   const WEEKDAY_LABELS = ["日", "月", "火", "水", "木", "金", "土"];
+
+  function renderSnackSettingsPanel() {
+    const d = snackSettingsDraft;
+    const set = (patch: Partial<SnackPaySettings>) => setSnackSettingsDraft((cur) => ({ ...cur, ...patch }));
+    const check = (key: keyof SnackPaySettings, label: string, note?: string) => (
+      <label className="flex items-start gap-2 text-sm text-gray-300">
+        <input
+          type="checkbox"
+          className="mt-1"
+          checked={d[key] as boolean}
+          onChange={(e) => set({ [key]: e.target.checked } as Partial<SnackPaySettings>)}
+        />
+        <span>
+          {label}
+          {note && <span className="block text-xs text-gray-500">{note}</span>}
+        </span>
+      </label>
+    );
+    const num = (value: number, onChange: (v: number) => void, suffix: string, scale = 1) => (
+      <span className="inline-flex items-center gap-1">
+        <input
+          value={String(Math.round(value * scale * 100) / 100)}
+          onChange={(e) => onChange(Number(e.target.value || 0) / scale)}
+          inputMode="decimal"
+          className="w-24 rounded-md bg-bg2 border border-line px-2 py-1 text-sm"
+        />
+        <span className="text-xs text-gray-500">{suffix}</span>
+      </span>
+    );
+    return (
+      <div className="rounded-xl border border-gold/40 bg-gold/5 p-3 space-y-3">
+        <div className="text-sm font-bold text-gold">給与計算方法</div>
+        <div className="space-y-1.5">
+          {PAY_METHODS.map((pm) => (
+            <button
+              key={pm.id}
+              type="button"
+              onClick={() => set({ method: pm.id })}
+              className={`w-full text-left rounded-md border px-3 py-2 text-sm ${
+                d.method === pm.id ? "border-gold text-gold bg-gold/10" : "border-line text-gray-400"
+              }`}
+            >
+              <span className="font-bold">{pm.id}.</span> {pm.label}
+              <span className="block text-xs text-gray-500">{pm.note}</span>
+            </button>
+          ))}
+        </div>
+        {d.method === 2 && (
+        <div className="space-y-2 pt-1">
+          {check("salesBackEnabled", "キャスト売上バック（指名のお客様の売上に段階率）")}
+          {d.salesBackEnabled && (
+            <div className="pl-6 space-y-2">
+              <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
+                {num(d.stepAmount, (v) => set({ stepAmount: v }), "円ごとに")}
+                {num(d.stepRate, (v) => set({ stepRate: v }), "%ずつ上がる（上限なし）", 100)}
+              </div>
+              {check("deductBottleCost", "酒代（ボトルの原価）を引く", "原価はメニュー管理でボトルごとに入力します")}
+              {check("deductCompanion", "同伴代（同伴手当の合計）を引く")}
+              {check("includeNominationInSales", "指名料も売上に含める")}
+              {check("includeBottleToOthersInSales", "指名のお客様が他の子に下ろしたボトルも、指名の子の売上に含める")}
+              <div className="text-xs text-gray-500">
+                率は差し引いた後の金額で決まり、その金額全体に掛けます（例：33.6万円 → 3%）。金額は消費税・テーブルチャージ抜きです。
+              </div>
+            </div>
+          )}
+          {check("bottleBackEnabled", "ボトルバック（指名ではないお客様が、その子にボトルを下ろした時）")}
+          {d.bottleBackEnabled && (
+            <div className="pl-6 flex items-center gap-2 text-sm text-gray-300">
+              販売価格 ×{num(d.bottleBackRate, (v) => set({ bottleBackRate: v }), "%（酒代は引かない）", 100)}
+            </div>
+          )}
+          {check("nominationFullBack", "指名料を全額その子のバックにする")}
+          <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
+            名刺代（毎月）{num(d.businessCardFee, (v) => set({ businessCardFee: v }), "円")}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
+            控除（名刺代を引いた後に）{num(d.deductionRate, (v) => set({ deductionRate: v }), "%", 100)}
+          </div>
+        </div>
+        )}
+        {d.method === 2 && (
+        <div className="text-xs text-gray-500">
+          ボトル・指名料・同伴として扱う商品は、メニュー管理の品目ごとの選択欄で選びます。同伴はメニューで入れるだけで、その品目の担当（未指定なら指名の子）の同伴回数になります。どの子に下ろしたボトルかは、伝票の品目の担当で記録します。保存は下の「保存する」ボタンで行います。
+        </div>
+        )}
+      </div>
+    );
+  }
 
   function renderStaffRow(s: Staff) {
     const specialOpen = specialWageOpenIds.has(s.id);
@@ -1552,6 +1723,7 @@ export default function SettingsPage() {
               「クラブ」にすると、伝票作成時に登録済みの顧客を選ぶことが必須になり、下のタブに「顧客」が表示されます。
             </div>
           </div>
+          {storeModeDraft === "club" && renderSnackSettingsPanel()}
           <div>
             <label className="block text-xs text-gray-400 mb-1">画面テーマ</label>
             <div className="flex gap-2">
@@ -1807,6 +1979,34 @@ export default function SettingsPage() {
               >
                 🍾
               </button>
+              {isTieredPayMethod && (
+                <>
+                  <select
+                    value={m.snack_item_kind ?? ""}
+                    onChange={(e) => updateMenuSnackKind(m, (e.target.value || null) as SnackItemKind | null)}
+                    title="給与計算での扱い（給与計算方法2）"
+                    className="text-xs rounded-md bg-bg2 border border-line px-1.5 py-1 text-gray-300 shrink-0"
+                  >
+                    <option value="">通常</option>
+                    <option value="bottle">ボトル・抜き物</option>
+                    <option value="nomination">指名料</option>
+                    <option value="companion">同伴</option>
+                  </select>
+                  {m.snack_item_kind === "bottle" && (
+                    <span className="inline-flex items-center gap-1 shrink-0">
+                      <input
+                        value={menuCostDrafts[m.id] ?? (m.cost_price != null ? String(m.cost_price) : "")}
+                        onChange={(e) => setMenuCostDrafts((d) => ({ ...d, [m.id]: e.target.value }))}
+                        onBlur={() => menuCostDrafts[m.id] !== undefined && saveMenuCost(m)}
+                        placeholder="原価"
+                        inputMode="numeric"
+                        title="原価（酒代として売上バックの元から引く額）"
+                        className="w-20 rounded-md bg-bg2 border border-line px-2 py-1 text-xs text-gray-300"
+                      />
+                    </span>
+                  )}
+                </>
+              )}
               <button
                 onClick={() => saveMenuRow(m.id)}
                 disabled={
@@ -2429,18 +2629,60 @@ export default function SettingsPage() {
                       ¥{Math.round(payslipData.allowance).toLocaleString()}
                     </td>
                   </tr>
-                  <tr className="border-b border-gray-100 text-gray-500 text-xs">
-                    <td className="py-1.5">個人総売上（歩合の元）</td>
-                    <td className="py-1.5 text-right font-mono">
-                      ¥{Math.round(payslipData.personalSales).toLocaleString()}
-                    </td>
-                  </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="py-2.5">歩合給</td>
-                    <td className="py-2.5 text-right font-mono">
-                      ¥{Math.round(payslipData.commission).toLocaleString()}
-                    </td>
-                  </tr>
+                  {!payslipData.snack && (
+                    <>
+                      <tr className="border-b border-gray-100 text-gray-500 text-xs">
+                        <td className="py-1.5">個人総売上（歩合の元）</td>
+                        <td className="py-1.5 text-right font-mono">
+                          ¥{Math.round(payslipData.personalSales).toLocaleString()}
+                        </td>
+                      </tr>
+                      <tr className="border-b border-gray-200">
+                        <td className="py-2.5">歩合給</td>
+                        <td className="py-2.5 text-right font-mono">
+                          ¥{Math.round(payslipData.commission).toLocaleString()}
+                        </td>
+                      </tr>
+                    </>
+                  )}
+                  {payslipData.snack && (
+                    <>
+                      <tr className="border-b border-gray-100 text-gray-500 text-xs">
+                        <td className="py-1.5">
+                          指名売上 ¥{Math.round(payslipData.snack.nominatedSales).toLocaleString()} − 酒代 ¥
+                          {Math.round(payslipData.snack.bottleCost).toLocaleString()} − 同伴代 ¥
+                          {Math.round(payslipData.snack.companionDeduction).toLocaleString()}
+                        </td>
+                        <td className="py-1.5 text-right font-mono">
+                          ¥{Math.round(payslipData.snack.salesBackBase).toLocaleString()}
+                        </td>
+                      </tr>
+                      <tr className="border-b border-gray-200">
+                        <td className="py-2.5">
+                          キャスト売上バック（{Math.round(payslipData.snack.salesBackRate * 1000) / 10}%）
+                        </td>
+                        <td className="py-2.5 text-right font-mono">
+                          ¥{Math.round(payslipData.snack.salesBack).toLocaleString()}
+                        </td>
+                      </tr>
+                      {payslipData.snack.bottleBack !== 0 && (
+                        <tr className="border-b border-gray-200">
+                          <td className="py-2.5">ボトルバック</td>
+                          <td className="py-2.5 text-right font-mono">
+                            ¥{Math.round(payslipData.snack.bottleBack).toLocaleString()}
+                          </td>
+                        </tr>
+                      )}
+                      {payslipData.snack.nominationBack !== 0 && (
+                        <tr className="border-b border-gray-200">
+                          <td className="py-2.5">指名料バック</td>
+                          <td className="py-2.5 text-right font-mono">
+                            ¥{Math.round(payslipData.snack.nominationBack).toLocaleString()}
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  )}
                   {payslipData.namedCustomerCommission !== 0 && (
                     <tr className="border-b border-gray-200">
                       <td className="py-2.5">指名歩合</td>
@@ -2477,6 +2719,28 @@ export default function SettingsPage() {
                       ¥{Math.round(payslipData.total).toLocaleString()}
                     </td>
                   </tr>
+                  {payslipData.snack && (
+                    <>
+                      <tr className="border-b border-gray-200">
+                        <td className="py-2.5">名刺代</td>
+                        <td className="py-2.5 text-right font-mono">
+                          −¥{Math.round(payslipData.snack.businessCardFee).toLocaleString()}
+                        </td>
+                      </tr>
+                      <tr className="border-b border-gray-200">
+                        <td className="py-2.5">控除（{Math.round(snackSettings.deductionRate * 1000) / 10}%）</td>
+                        <td className="py-2.5 text-right font-mono">
+                          −¥{Math.round(payslipData.snack.deduction).toLocaleString()}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="pt-4 font-bold">差引支給額</td>
+                        <td className="pt-4 text-right font-mono font-bold text-lg">
+                          ¥{Math.round(payslipData.snack.net).toLocaleString()}
+                        </td>
+                      </tr>
+                    </>
+                  )}
                 </tbody>
               </table>
               <div className="text-xs text-gray-500 pt-4 border-t border-gray-300">
