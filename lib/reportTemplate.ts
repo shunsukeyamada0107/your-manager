@@ -48,6 +48,7 @@ export const REPORT_TEMPLATE_TOKENS: { token: string; label: string }[] = [
   { token: "expense", label: "本日の経費" },
   { token: "profit", label: "本日の純利益（売上-経費）" },
   { token: "card", label: "本日のカード決済額" },
+  { token: "receivable", label: "本日の未収額（後日回収する分）" },
   { token: "tab_count", label: "本日の組数" },
   { token: "guest_count", label: "本日の人数(合計)" },
   { token: "coupon50", label: "本日の50%OFFクーポン枚数" },
@@ -60,12 +61,13 @@ export const REPORT_TEMPLATE_TOKENS: { token: string; label: string }[] = [
   { token: "month_expense", label: "今月の経費" },
   { token: "month_profit", label: "今月の純利益" },
   { token: "month_card", label: "今月のカード決済額" },
+  { token: "month_receivable", label: "今月の未収額（後日回収する分）" },
   { token: "month_tab_count", label: "今月の組数" },
   { token: "month_guest_count", label: "今月の人数(合計)" },
   { token: "month_coupon50", label: "今月の50%OFFクーポン枚数" },
   { token: "month_hourly", label: "今月の時給スタッフ時間&人件費(スタッフごと改行)" },
   { token: "month_commission", label: "今月のスタッフ別歩合給(スタッフごと改行)" },
-  { token: "month_unsettled", label: "今月の未収一覧(伝票ごと改行)" },
+  { token: "month_unsettled", label: "今月の未収一覧(伝票ごと改行。未会計の伝票と、会計済みで未収が残っている伝票)" },
 ];
 
 export function renderReportTemplate(template: string, tokens: Record<string, string>): string {

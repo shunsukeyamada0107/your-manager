@@ -83,6 +83,22 @@ export const PAYMENT_METHOD_EMOJI: Record<PaymentMethod, string> = {
   other_epayment: "🔷",
 };
 
+// 1つの伝票を複数の方法で支払う（現金＋カード、一部未収など）ための支払い区分。receivable=未収（後日回収する分）
+export type PaymentKind = PaymentMethod | "receivable";
+
+export const PAYMENT_KIND_LABELS: Record<PaymentKind, string> = { ...PAYMENT_METHOD_LABELS, receivable: "未収" };
+export const PAYMENT_KIND_EMOJI: Record<PaymentKind, string> = { ...PAYMENT_METHOD_EMOJI, receivable: "📒" };
+export const PAYMENT_KIND_ORDER: PaymentKind[] = ["cash", "card", "paypay", "other_epayment", "receivable"];
+
+export type TabPayment = {
+  id: string;
+  store_id: string;
+  tab_id: string;
+  method: PaymentKind;
+  amount: number;
+  created_at: string;
+};
+
 export type Tab = {
   id: string;
   store_id: string;
@@ -98,9 +114,11 @@ export type Tab = {
   discount_percent: number | null;
   discount_amount: number | null;
   staff_id: string | null; // この伝票の担当スタッフ（歩合給の対象）
-  companion_staff_id: string | null; // この来店を同伴したスタッフ（歩合対象のstaff_idとは別軸。クラブモード用）
+  companion_staff_id: string | null; // 旧・同伴スタッフ（1人分）。companion_staff_idsと同じ内容を保つ。読むときはtabCompanionIds()を使う
+  companion_staff_ids: string[]; // この来店を同伴したスタッフ（複数可。歩合対象のstaff_idとは別軸。クラブモード用）
   created_at: string; // 来店
   closed_at: string | null; // 退店・会計
+  tab_payments?: TabPayment[]; // 支払い内訳（分割払い・未収）。無い・空なら payment_method の1回払いとして扱う
 };
 
 export type TabItem = {
@@ -227,6 +245,59 @@ export function tabTotal(
 ) {
   const raw = tabPreDiscountTotal(items, taxRate) - tabDiscountAmount(items, taxRate, discountPercent, discountAmount);
   return roundUpToUnit(raw, roundUnit);
+}
+
+// 同伴したスタッフのid一覧。companion_staff_ids（複数）を優先し、無ければ旧列companion_staff_id（1人）を使う
+export function tabCompanionIds(t: Pick<Tab, "companion_staff_id" | "companion_staff_ids">): string[] {
+  if (t.companion_staff_ids?.length) return t.companion_staff_ids;
+  return t.companion_staff_id ? [t.companion_staff_id] : [];
+}
+
+export type PaymentPart = { method: PaymentKind; amount: number | null };
+
+// 伝票の支払い内訳（表示用）。分割払いの記録があればそれを、無ければpayment_methodの1回払いとして返す
+// （1回払いは金額が伝票の合計と同じなのでamount=null）。会計前・支払い方法なしの伝票は空
+export function tabPaymentParts(t: Pick<Tab, "closed_at" | "payment_method" | "tab_payments">): PaymentPart[] {
+  if (!t.closed_at) return [];
+  if (t.tab_payments?.length) {
+    return [...t.tab_payments]
+      .sort((a, b) => PAYMENT_KIND_ORDER.indexOf(a.method) - PAYMENT_KIND_ORDER.indexOf(b.method))
+      .map((p) => ({ method: p.method, amount: p.amount }));
+  }
+  return t.payment_method ? [{ method: t.payment_method, amount: null }] : [];
+}
+
+export type PaymentAllocation = { cash: number; electronic: number; receivable: number };
+
+// 会計済み伝票の合計(total)を、現金・電子決済・未収に振り分ける。分割払いの記録があればその比率で、
+// 無ければpayment_methodの1回払いとして全額を振り分ける。会計前や支払い方法の無い伝票はnull（未会計扱い）。
+// 会計後に品目や割引が変わって内訳の合計とtotalがずれた場合は、内訳の比率のままtotalに合わせて按分する
+// （現金＋カード＋未収＋未会計が常に売上合計と一致するように）
+export function tabPaymentAllocation(
+  t: Pick<Tab, "closed_at" | "payment_method" | "tab_payments">,
+  total: number
+): PaymentAllocation | null {
+  if (!t.closed_at) return null;
+  const alloc: PaymentAllocation = { cash: 0, electronic: 0, receivable: 0 };
+  const add = (method: PaymentKind, amount: number) => {
+    if (method === "cash") alloc.cash += amount;
+    else if (method === "receivable") alloc.receivable += amount;
+    else alloc.electronic += amount;
+  };
+  const payments = t.tab_payments ?? [];
+  if (payments.length > 0) {
+    const sum = payments.reduce((a, p) => a + p.amount, 0);
+    if (sum <= 0) {
+      alloc.receivable = total;
+    } else {
+      const scale = sum === total ? 1 : total / sum;
+      payments.forEach((p) => add(p.method, p.amount * scale));
+    }
+    return alloc;
+  }
+  if (!t.payment_method) return null;
+  add(t.payment_method, total);
+  return alloc;
 }
 
 // "#RRGGBB" → "R G B"（TailwindのCSS変数カラーに渡すための形式）。不正な値なら既定のゴールドにフォールバック
@@ -527,7 +598,8 @@ export type DaySummary = {
   profit: number;
   cash: number;
   card: number;
-  unsettled: number;
+  receivable: number; // 未収（会計済みだが後日回収する分）
+  unsettled: number; // 未会計（まだ会計していない伝票）
 };
 
 export function daySummary(
@@ -570,15 +642,21 @@ export function daySummary(
   const expense = expenses.reduce((a, e) => a + e.amount, 0);
   let cash = 0,
     card = 0,
+    receivable = 0,
     unsettled = 0;
   tabs.forEach((t) => {
     const tot = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
-    if (t.closed_at && t.payment_method === "cash") cash += tot;
-    else if (t.closed_at && t.payment_method) card += tot; // カード・PayPay・その他電子決済はまとめて「現金以外」として集計
-    else unsettled += tot;
+    const alloc = tabPaymentAllocation(t, tot);
+    if (!alloc) {
+      unsettled += tot;
+      return;
+    }
+    cash += alloc.cash;
+    card += alloc.electronic; // カード・PayPay・その他電子決済はまとめて「現金以外」として集計
+    receivable += alloc.receivable;
   });
-  // 合計は実際に会計する（100円単位切り上げ後の）金額を必ず使う：現金＋カード＋未会計と一致する
-  const total = cash + card + unsettled;
+  // 合計は実際に会計する（切り上げ後の）金額を必ず使う：現金＋カード＋未収＋未会計と一致する
+  const total = cash + card + receivable + unsettled;
   const roundingAdjustment = total - (subtotal + tax);
   return {
     subtotal,
@@ -593,6 +671,7 @@ export function daySummary(
     profit: total - expense,
     cash,
     card,
+    receivable,
     unsettled,
   };
 }
@@ -763,7 +842,7 @@ export function namedCustomerCommission(
 
 export type CompanionStats = { staffId: string; name: string; count: number; amount: number };
 
-// 同伴手当：会計済み（closed_atがある）伝票のうち、companion_staff_idが設定されているものを
+// 同伴手当：会計済み（closed_atがある）伝票のうち、同伴スタッフが設定されているものを
 // 同伴したスタッフごとに数え、スタッフごとの「1回あたりの同伴手当額」を掛けて金額にする。
 // 同伴（来店のきっかけを作った人）は、その伝票を実際に接客したスタッフ（staff_id）とは独立した別軸の集計
 export function companionAllowanceBreakdown(
@@ -773,10 +852,12 @@ export function companionAllowanceBreakdown(
 ): CompanionStats[] {
   const map: Record<string, CompanionStats> = {};
   tabs.forEach((t) => {
-    if (!t.closed_at || !t.companion_staff_id) return;
-    const id = t.companion_staff_id;
-    if (!map[id]) map[id] = { staffId: id, name: staffNameOf(id), count: 0, amount: 0 };
-    map[id].count += 1;
+    if (!t.closed_at) return;
+    // 複数人で同伴した場合は、同伴した全員がそれぞれ1回と数える
+    tabCompanionIds(t).forEach((id) => {
+      if (!map[id]) map[id] = { staffId: id, name: staffNameOf(id), count: 0, amount: 0 };
+      map[id].count += 1;
+    });
   });
   Object.values(map).forEach((c) => {
     c.amount = c.count * allowanceAmountFor(c.staffId);
@@ -954,8 +1035,8 @@ export function snackPayBreakdown(
   };
 }
 
-// 給与計算方法2の同伴回数。伝票に同伴料の品目が入っていれば、その品目の担当（未指定なら伝票の同伴ボタンの子→
-// 指名の子→伝票の担当の順）に数量分を数える。同伴料の品目が無い伝票は、従来どおり同伴ボタン（companion_staff_id）で1回と数える。
+// 給与計算方法2の同伴回数。伝票に同伴料の品目が入っていれば、その品目の担当（未指定なら伝票の同伴ボタンの人たち
+// で分け合い、同伴ボタンが無ければ指名の子→伝票の担当の順）に数量分を数える。同伴料の品目が無い伝票は、従来どおり同伴ボタンで1回と数える。
 // 同じ伝票で品目とボタンの両方を使っても二重には数えない
 export function snackCompanionCount(
   tabs: TabWithItems[],
@@ -969,13 +1050,21 @@ export function snackCompanionCount(
   tabs.forEach((t) => {
     if (!t.closed_at) return;
     const companionItems = t.tab_items.filter((i) => menuOf(i)?.snack_item_kind === "companion");
+    const companions = tabCompanionIds(t);
     if (companionItems.length === 0) {
-      if (t.companion_staff_id === staffId) count += 1;
+      if (companions.includes(staffId)) count += 1;
       return;
     }
     const nominator = t.customer_id ? primaryOf.get(t.customer_id) ?? null : null;
     companionItems.forEach((i) => {
-      if ((i.staff_id ?? t.companion_staff_id ?? nominator ?? t.staff_id) === staffId) count += i.qty;
+      if (i.staff_id) {
+        if (i.staff_id === staffId) count += i.qty;
+      } else if (companions.length > 0) {
+        // 担当が未指定の同伴料は同伴した全員で数量を分け合う。ただし同伴した人は最低1回と数える
+        if (companions.includes(staffId)) count += Math.max(1, i.qty / companions.length);
+      } else if ((nominator ?? t.staff_id) === staffId) {
+        count += i.qty;
+      }
     });
   });
   return count;

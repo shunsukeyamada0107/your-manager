@@ -11,14 +11,19 @@ import {
   categoryColorFor,
   Customer,
   MenuItem,
-  PAYMENT_METHOD_EMOJI,
+  PAYMENT_KIND_EMOJI,
+  PAYMENT_KIND_LABELS,
+  PAYMENT_KIND_ORDER,
   PAYMENT_METHOD_LABELS,
+  PaymentKind,
   PaymentMethod,
   Staff,
   TabItem,
   TabWithItems,
   tabColorFor,
+  tabCompanionIds,
   tabDiscountAmount,
+  tabPaymentParts,
   tabSubtotal,
   tabTax,
   tabTotal,
@@ -230,6 +235,10 @@ function POSPageInner() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [justCreatedTabId, setJustCreatedTabId] = useState<string | null>(null);
   const [pendingSettleMethod, setPendingSettleMethod] = useState<PaymentMethod | null>(null);
+  // 分割払い・未収の入力（支払い区分ごとの金額）。splitTabIdがある間だけ内訳入力の画面を開く
+  const [splitTabId, setSplitTabId] = useState<string | null>(null);
+  const [splitAmounts, setSplitAmounts] = useState<Record<string, string>>({});
+  const [splitSaving, setSplitSaving] = useState(false);
   const [modalName, setModalName] = useState("");
   const [nameSearchResults, setNameSearchResults] = useState<TabWithItems[]>([]);
   const [searchingName, setSearchingName] = useState(false);
@@ -307,7 +316,7 @@ function POSPageInner() {
 
     const { data: tabsData } = await supabase
       .from("tabs")
-      .select("*, tab_items(*), customers(name, name_kana, phone, birthday, bottle_keep, memo)")
+      .select("*, tab_items(*), tab_payments(*), customers(name, name_kana, phone, birthday, bottle_keep, memo)")
       .eq("store_id", storeId)
       .eq("business_date", businessDate)
       .order("created_at", { ascending: true })
@@ -833,9 +842,15 @@ function POSPageInner() {
     loadData();
   }
 
-  async function setTabCompanion(staffId: string | null) {
+  // 同伴スタッフは複数人選べる。旧列companion_staff_idには先頭の1人を同じ内容として残しておく
+  async function toggleTabCompanion(staffId: string) {
     if (!activeTab) return;
-    await supabase.from("tabs").update({ companion_staff_id: staffId }).eq("id", activeTab.id);
+    const current = tabCompanionIds(activeTab);
+    const next = current.includes(staffId) ? current.filter((id) => id !== staffId) : [...current, staffId];
+    await supabase
+      .from("tabs")
+      .update({ companion_staff_ids: next, companion_staff_id: next[0] ?? null })
+      .eq("id", activeTab.id);
     loadData();
   }
 
@@ -968,11 +983,51 @@ function POSPageInner() {
 
   async function reopenTab() {
     if (!activeTab) return;
-    await supabase
+    const { error } = await supabase
       .from("tabs")
       .update({ payment_method: null, closed_at: null })
       .eq("id", activeTab.id);
+    // 分割払い・未収の内訳も消す（先に伝票を未会計に戻してから消すので、途中で失敗しても二重計上にならない）
+    if (!error) await supabase.from("tab_payments").delete().eq("tab_id", activeTab.id);
     loadData();
+  }
+
+  // 分割払い・未収の内訳入力を開く。会計済みの伝票なら今の内訳を初期値にして、後から内訳を直せるようにする
+  function openSplitSettle(tab: TabWithItems) {
+    const total = tabTotal(tab.tab_items, taxRate, tab.discount_percent, tab.discount_amount, roundUnit);
+    const initial: Record<string, string> = {};
+    tabPaymentParts(tab).forEach((p) => {
+      initial[p.method] = String(Math.round(p.amount ?? total));
+    });
+    setSplitAmounts(initial);
+    setSplitTabId(tab.id);
+    setShowEpaymentPicker(false);
+    setOperationError(null);
+  }
+
+  async function confirmSplitSettle() {
+    const tab = tabs.find((t) => t.id === splitTabId);
+    if (!tab) return;
+    const total = tabTotal(tab.tab_items, taxRate, tab.discount_percent, tab.discount_amount, roundUnit);
+    const entries = PAYMENT_KIND_ORDER.map((method) => ({
+      method,
+      amount: Math.round(Number(splitAmounts[method] || 0)),
+    })).filter((e) => e.amount > 0);
+    const sum = entries.reduce((a, e) => a + e.amount, 0);
+    if (entries.some((e) => !Number.isFinite(e.amount)) || sum !== total) return;
+    setSplitSaving(true);
+    setOperationError(null);
+    const wasClosed = !!tab.closed_at;
+    const { error } = await supabase.rpc("settle_tab", { p_tab_id: tab.id, p_payments: entries });
+    setSplitSaving(false);
+    if (error) {
+      setSplitTabId(null);
+      setOperationError("会計を確定できませんでした。通信状態を確認して、もう一度お試しください。");
+      return;
+    }
+    setSplitTabId(null);
+    loadData();
+    if (!wasClosed) setShowReceipt(true);
   }
 
   async function deleteTab() {
@@ -1024,21 +1079,48 @@ function POSPageInner() {
     }
   }
 
+  // 会計済みカードの先頭に出す絵文字。分割払いなら使った支払い方法をすべて並べる
+  function paymentEmojiOf(t: TabWithItems) {
+    const parts = tabPaymentParts(t);
+    return parts.length > 0 ? parts.map((p) => PAYMENT_KIND_EMOJI[p.method]).join("") : "💴";
+  }
+
   function renderPaymentButtons(tab: TabWithItems) {
     if (tab.closed_at) {
+      const parts = tabPaymentParts(tab);
       return (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-3">
+          {parts.length > 0 && (
+            <div className="text-center text-xs text-gray-400">
+              {parts
+                .map(
+                  (p) =>
+                    `${PAYMENT_KIND_EMOJI[p.method]} ${PAYMENT_KIND_LABELS[p.method]}${
+                      p.amount != null ? ` ¥${p.amount.toLocaleString()}` : ""
+                    }`
+                )
+                .join(" ・ ")}
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              onClick={() => setShowReceipt(true)}
+              className="rounded-xl border border-gold text-gold py-3 text-sm font-bold"
+            >
+              🧾 レシートを表示
+            </button>
+            <button
+              onClick={reopenTab}
+              className="rounded-xl border border-line py-3 text-sm font-bold text-gray-300"
+            >
+              会計を取り消す
+            </button>
+          </div>
           <button
-            onClick={() => setShowReceipt(true)}
-            className="rounded-xl border border-gold text-gold py-3 text-sm font-bold"
+            onClick={() => openSplitSettle(tab)}
+            className="w-full rounded-xl border border-line py-2.5 text-sm font-bold text-gray-300"
           >
-            🧾 レシートを表示
-          </button>
-          <button
-            onClick={reopenTab}
-            className="rounded-xl border border-line py-3 text-sm font-bold text-gray-300"
-          >
-            会計を取り消す
+            お支払い内訳を変更（未収の回収など）
           </button>
         </div>
       );
@@ -1048,6 +1130,7 @@ function POSPageInner() {
     const multiple = enabledEpaymentMethods.length > 1;
 
     return (
+      <div className="space-y-3">
       <div className={`grid gap-3 ${single || multiple ? "grid-cols-2" : "grid-cols-1"}`}>
         <button
           onClick={() => requestSettle("cash")}
@@ -1074,6 +1157,13 @@ function POSPageInner() {
             電子決済で会計
           </button>
         )}
+      </div>
+      <button
+        onClick={() => openSplitSettle(tab)}
+        className="w-full rounded-xl border border-gold text-gold font-bold py-3 text-sm active:scale-[0.97] transition-transform"
+      >
+        分割払い・未収で会計（現金＋カード、一部未収など）
+      </button>
       </div>
     );
   }
@@ -1323,7 +1413,7 @@ function POSPageInner() {
                     } bg-elevated`}
                   >
                     <div className="text-sm font-bold truncate">
-                      {t.payment_method ? PAYMENT_METHOD_EMOJI[t.payment_method] : "💴"} {t.name}
+                      {paymentEmojiOf(t)} {t.name}
                     </div>
                     <div className="text-[10px] text-gray-500 mt-0.5">{formatBusinessDate(t.business_date)}</div>
                     <div className="text-xs font-mono mt-0.5">
@@ -1691,9 +1781,9 @@ function POSPageInner() {
                 {staff.map((s) => (
                   <button
                     key={s.id}
-                    onClick={() => setTabCompanion(activeTab.companion_staff_id === s.id ? null : s.id)}
+                    onClick={() => toggleTabCompanion(s.id)}
                     className={`shrink-0 rounded-full px-3 py-2 text-sm border ${
-                      activeTab.companion_staff_id === s.id
+                      tabCompanionIds(activeTab).includes(s.id)
                         ? "bg-gold text-bg border-gold"
                         : "bg-elevated text-gray-300 border-line"
                     }`}
@@ -1703,7 +1793,7 @@ function POSPageInner() {
                 ))}
               </div>
               <div className="text-sm text-gray-400 mt-2">
-                このお客様を同伴して来店したスタッフを選びます（担当スタッフとは別。もう一度タップで解除）
+                このお客様を同伴して来店したスタッフを選びます（複数人まとめて選べます。担当スタッフとは別。もう一度タップで解除）
               </div>
             </div>
           )}
@@ -1926,6 +2016,103 @@ function POSPageInner() {
         </div>
       )}
 
+      {splitTabId &&
+        (() => {
+          const tab = tabs.find((t) => t.id === splitTabId);
+          if (!tab) return null;
+          const total = tabTotal(tab.tab_items, taxRate, tab.discount_percent, tab.discount_amount, roundUnit);
+          const kinds: PaymentKind[] = PAYMENT_KIND_ORDER.filter(
+            (k) =>
+              k === "cash" ||
+              k === "receivable" ||
+              enabledEpaymentMethods.some((m) => m.method === k) ||
+              Number(splitAmounts[k] || 0) > 0
+          );
+          const amountOf = (k: PaymentKind) => Math.round(Number(splitAmounts[k] || 0));
+          const sum = kinds.reduce((a, k) => a + amountOf(k), 0);
+          const remaining = total - sum;
+          const valid = total > 0 && remaining === 0 && kinds.every((k) => Number.isFinite(amountOf(k)));
+          const wasClosed = !!tab.closed_at;
+          return (
+            <div
+              className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4"
+              onClick={() => setSplitTabId(null)}
+            >
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-sm rounded-xl border border-line bg-elevated p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+              >
+                <div>
+                  <div className="text-gold font-bold text-base">
+                    {wasClosed ? "お支払い内訳を変更" : "分割払い・未収で会計"}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1">
+                    支払い方法ごとの金額を入れて、合計をお会計金額に合わせてください
+                  </div>
+                </div>
+                <div className="flex justify-between items-baseline">
+                  <span className="text-sm text-gray-300">お会計金額</span>
+                  <span className="font-mono font-bold text-gold text-2xl">¥{total.toLocaleString()}</span>
+                </div>
+                <div className="space-y-2.5">
+                  {kinds.map((k) => (
+                    <div key={k} className="flex items-center gap-2">
+                      <span className={`w-24 shrink-0 text-sm ${k === "receivable" ? "text-warn font-bold" : "text-gray-200"}`}>
+                        {PAYMENT_KIND_EMOJI[k]} {PAYMENT_KIND_LABELS[k]}
+                      </span>
+                      <input
+                        value={splitAmounts[k] ?? ""}
+                        onChange={(e) =>
+                          setSplitAmounts((m) => ({ ...m, [k]: e.target.value.replace(/[^0-9]/g, "") }))
+                        }
+                        inputMode="numeric"
+                        placeholder="0"
+                        className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2.5 py-2 text-right font-mono text-base"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSplitAmounts((m) => ({ ...m, [k]: String(Math.max(0, amountOf(k) + remaining)) }))
+                        }
+                        disabled={remaining <= 0}
+                        className="shrink-0 text-xs rounded-md border border-line px-2 py-2 text-gray-300 disabled:opacity-40"
+                      >
+                        残り
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="text-xs text-gray-500">
+                  「未収」は後日お支払いいただく分です。回収できたら、この画面で「お支払い内訳を変更」から現金やカードに入れ替えてください。
+                </div>
+                <div
+                  className={`flex justify-between text-sm font-mono ${
+                    remaining === 0 ? "text-good" : "text-rose"
+                  }`}
+                >
+                  <span>{remaining >= 0 ? "残り" : "超過"}</span>
+                  <span>¥{Math.abs(remaining).toLocaleString()}</span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setSplitTabId(null)}
+                    className="flex-1 rounded-xl border border-line py-3 text-sm text-gray-300"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    onClick={confirmSplitSettle}
+                    disabled={!valid || splitSaving}
+                    className="flex-1 rounded-xl bg-gold text-bg py-3 text-sm font-bold disabled:opacity-40 active:scale-[0.97] transition-transform"
+                  >
+                    {splitSaving ? "保存中..." : wasClosed ? "内訳を保存" : "会計する"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
       {pendingSettleMethod && activeTab && (
         <div
           className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
@@ -2051,11 +2238,30 @@ function POSPageInner() {
               </span>
             </div>
 
-            {activeTab.payment_method && (
-              <div className="text-center text-xs text-gray-500">
-                {PAYMENT_METHOD_EMOJI[activeTab.payment_method]} {PAYMENT_METHOD_LABELS[activeTab.payment_method]}でお支払い
-              </div>
-            )}
+            {(() => {
+              const parts = tabPaymentParts(activeTab);
+              if (parts.length === 0) return null;
+              if (parts.length === 1 && parts[0].amount == null) {
+                return (
+                  <div className="text-center text-xs text-gray-500">
+                    {PAYMENT_KIND_EMOJI[parts[0].method]} {PAYMENT_KIND_LABELS[parts[0].method]}でお支払い
+                  </div>
+                );
+              }
+              return (
+                <div className="space-y-0.5 text-xs text-gray-500">
+                  {parts.map((p) => (
+                    <div key={p.method} className="flex justify-between">
+                      <span>
+                        {PAYMENT_KIND_EMOJI[p.method]} {PAYMENT_KIND_LABELS[p.method]}
+                        {p.method === "receivable" ? "（後日お支払い）" : ""}
+                      </span>
+                      <span className="font-mono">¥{(p.amount ?? 0).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
 
             <button
               onClick={() => setShowReceipt(false)}

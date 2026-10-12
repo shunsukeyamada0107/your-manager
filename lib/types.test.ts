@@ -32,6 +32,10 @@ import {
   snackPayBreakdown,
   snackDeductions,
   snackCompanionCount,
+  tabCompanionIds,
+  tabPaymentAllocation,
+  tabPaymentParts,
+  TabPayment,
   normalizeSnackPaySettings,
   DEFAULT_SNACK_PAY_SETTINGS,
   MenuItem,
@@ -76,6 +80,7 @@ function tab(overrides: Partial<TabWithItems> = {}): TabWithItems {
     discount_amount: null,
     staff_id: null,
     companion_staff_id: null,
+    companion_staff_ids: [],
     created_at: "2026-07-01T20:00:00+09:00",
     closed_at: "2026-07-01T23:00:00+09:00",
     tab_items: [],
@@ -582,6 +587,34 @@ describe("daySummary reconciliation", () => {
     expect(summary.labor).toBeCloseTo(summary.laborHourly + summary.commissionTotal, 8);
   });
 
+  it("splits a closed tab across cash/card/receivable and keeps the parts equal to total", () => {
+    const pay = (method: TabPayment["method"], amount: number): TabPayment => ({
+      id: Math.random().toString(36),
+      store_id: "s",
+      tab_id: "t",
+      method,
+      amount,
+      created_at: "2026-07-01T23:00:00+09:00",
+    });
+    const tabs: TabWithItems[] = [
+      // 合計11000円を 現金5000＋カード4000＋未収2000 で支払い（payment_methodは代表の現金）
+      tab({
+        payment_method: "cash",
+        tab_payments: [pay("cash", 5000), pay("card", 4000), pay("receivable", 2000)],
+        tab_items: [item({ price: 10000, qty: 1 })],
+      }),
+      // 従来の1回払い（内訳なし）
+      tab({ payment_method: "card", tab_items: [item({ price: 1000, qty: 1 })] }), // 1100
+      tab({ closed_at: null, tab_items: [item({ price: 500, qty: 1 })] }), // 550→600 未会計
+    ];
+    const summary = daySummary(tabs, [], [], staffNameOf, 0.1, 0.2, "simple");
+    expect(summary.cash).toBe(5000);
+    expect(summary.card).toBe(4000 + 1100);
+    expect(summary.receivable).toBe(2000);
+    expect(summary.unsettled).toBe(600);
+    expect(summary.cash + summary.card + summary.receivable + summary.unsettled).toBeCloseTo(summary.total, 5);
+  });
+
   it("excludes ineligible staff's sales from commissionTotal but keeps their hourly cost", () => {
     const tabs: TabWithItems[] = [tab({ staff_id: "kitchen", tab_items: [item({ price: 3000, qty: 1 })] })];
     const attendance: Attendance[] = [
@@ -842,6 +875,52 @@ describe("namedCustomerCommission", () => {
   });
 });
 
+describe("tabPaymentAllocation / tabPaymentParts", () => {
+  const pay = (method: TabPayment["method"], amount: number): TabPayment => ({
+    id: Math.random().toString(36),
+    store_id: "s",
+    tab_id: "t",
+    method,
+    amount,
+    created_at: "2026-07-01T23:00:00+09:00",
+  });
+
+  it("treats a closed tab without a breakdown as a single payment by payment_method", () => {
+    const t = tab({ payment_method: "paypay" });
+    expect(tabPaymentAllocation(t, 3000)).toEqual({ cash: 0, electronic: 3000, receivable: 0 });
+    expect(tabPaymentParts(t)).toEqual([{ method: "paypay", amount: null }]);
+  });
+
+  it("returns null for open tabs and for closed tabs with no payment info", () => {
+    expect(tabPaymentAllocation(tab({ closed_at: null }), 1000)).toBeNull();
+    expect(tabPaymentAllocation(tab({ payment_method: null }), 1000)).toBeNull();
+    expect(tabPaymentParts(tab({ closed_at: null }))).toEqual([]);
+  });
+
+  it("uses the breakdown amounts as-is when they add up to the total", () => {
+    const t = tab({ tab_payments: [pay("cash", 1000), pay("card", 2000)] });
+    expect(tabPaymentAllocation(t, 3000)).toEqual({ cash: 1000, electronic: 2000, receivable: 0 });
+  });
+
+  it("scales the breakdown to the total if the tab changed after payment", () => {
+    const t = tab({ tab_payments: [pay("cash", 1000), pay("receivable", 1000)] });
+    expect(tabPaymentAllocation(t, 4000)).toEqual({ cash: 2000, electronic: 0, receivable: 2000 });
+  });
+
+  it("shows breakdown parts in a fixed order (cash, electronic, receivable)", () => {
+    const t = tab({ tab_payments: [pay("receivable", 1), pay("card", 2), pay("cash", 3)] });
+    expect(tabPaymentParts(t).map((p) => p.method)).toEqual(["cash", "card", "receivable"]);
+  });
+});
+
+describe("tabCompanionIds", () => {
+  it("prefers the multi-select list and falls back to the old single column", () => {
+    expect(tabCompanionIds({ companion_staff_id: "a", companion_staff_ids: ["a", "b"] })).toEqual(["a", "b"]);
+    expect(tabCompanionIds({ companion_staff_id: "a", companion_staff_ids: [] })).toEqual(["a"]);
+    expect(tabCompanionIds({ companion_staff_id: null, companion_staff_ids: [] })).toEqual([]);
+  });
+});
+
 describe("companionAllowanceBreakdown", () => {
   const allowanceFor = (id: string) => (id === "a" ? 2000 : 0);
 
@@ -853,6 +932,13 @@ describe("companionAllowanceBreakdown", () => {
       tab({ companion_staff_id: null }), // 同伴なし
       tab({ companion_staff_id: "a", closed_at: null }), // 未会計は数えない
     ];
+    const result = companionAllowanceBreakdown(tabs, staffNameOf, allowanceFor);
+    expect(result.find((c) => c.staffId === "a")).toEqual({ staffId: "a", name: "Aさん", count: 2, amount: 4000 });
+    expect(result.find((c) => c.staffId === "b")).toEqual({ staffId: "b", name: "Bさん", count: 1, amount: 0 });
+  });
+
+  it("counts every companion on a tab once each", () => {
+    const tabs = [tab({ companion_staff_ids: ["a", "b"] }), tab({ companion_staff_ids: ["a"] })];
     const result = companionAllowanceBreakdown(tabs, staffNameOf, allowanceFor);
     expect(result.find((c) => c.staffId === "a")).toEqual({ staffId: "a", name: "Aさん", count: 2, amount: 4000 });
     expect(result.find((c) => c.staffId === "b")).toEqual({ staffId: "b", name: "Bさん", count: 1, amount: 0 });
@@ -971,6 +1057,18 @@ describe("snack mode pay", () => {
     ];
     expect(snackCompanionCount(tabs, customers, m, "a")).toBe(3);
     expect(snackCompanionCount(tabs, customers, m, "b")).toBe(1);
+  });
+
+  it("with several companions, each counts at least once and extra 同伴 quantity is shared", () => {
+    const m = [...menus, menu({ name: "同伴", price: 3000, snack_item_kind: "companion" })];
+    const one = [tab({ companion_staff_ids: ["a", "b"], tab_items: [item({ name: "同伴", price: 3000, qty: 1 })] })];
+    expect(snackCompanionCount(one, customers, m, "a")).toBe(1);
+    expect(snackCompanionCount(one, customers, m, "b")).toBe(1);
+    const four = [tab({ companion_staff_ids: ["a", "b"], tab_items: [item({ name: "同伴", price: 3000, qty: 4 })] })];
+    expect(snackCompanionCount(four, customers, m, "a")).toBe(2);
+    expect(snackCompanionCount(four, customers, m, "b")).toBe(2);
+    const noItem = [tab({ companion_staff_ids: ["a", "b"], tab_items: [item({ name: "SET", price: 13000 })] })];
+    expect(snackCompanionCount(noItem, customers, m, "b")).toBe(1);
   });
 
   it("deducts the business card fee first, then 10% of the rest", () => {

@@ -16,9 +16,11 @@ import {
   DaySummary,
   HourlyLaborRow,
   StaffCommission,
-  PAYMENT_METHOD_EMOJI,
-  PAYMENT_METHOD_LABELS,
+  PAYMENT_KIND_EMOJI,
+  PAYMENT_KIND_LABELS,
   itemSubtotal,
+  tabPaymentAllocation,
+  tabPaymentParts,
   tabSubtotal,
   tabDiscountAmount,
   tabTax,
@@ -35,6 +37,12 @@ import { MonthlySalesChart, ChartPoint } from "@/lib/MonthlySalesChart";
 import { DEFAULT_REPORT_TEMPLATE, renderReportTemplate } from "@/lib/reportTemplate";
 
 type DayRow = { date: string; tabCount: number; guestCount: number } & DaySummary;
+
+// 伝票の支払い方法の絵文字。分割払いなら使った支払い方法をすべて並べる（支払い方法の記録が無い会計済み伝票は現金扱い）
+function tabPaymentEmoji(t: TabWithItems) {
+  const parts = tabPaymentParts(t);
+  return parts.length > 0 ? parts.map((p) => PAYMENT_KIND_EMOJI[p.method]).join("") : "💴";
+}
 
 function yen(n: number) {
   return `¥${Math.round(n).toLocaleString()}`;
@@ -409,7 +417,7 @@ export default function ReportPage() {
 
     const { data: tabsData } = await supabase
       .from("tabs")
-      .select("*, tab_items(*)")
+      .select("*, tab_items(*), tab_payments(*)")
       .eq("store_id", storeId)
       .eq("business_date", businessDate);
     setTabs((tabsData as TabWithItems[]) ?? []);
@@ -438,7 +446,7 @@ export default function ReportPage() {
     ] = await Promise.all([
       supabase
         .from("tabs")
-        .select("*, tab_items(*)")
+        .select("*, tab_items(*), tab_payments(*)")
         .eq("store_id", storeId)
         .gte("business_date", monthStart)
         .lte("business_date", monthEnd),
@@ -456,7 +464,7 @@ export default function ReportPage() {
         .lte("business_date", monthEnd),
       supabase
         .from("tabs")
-        .select("*, tab_items(*)")
+        .select("*, tab_items(*), tab_payments(*)")
         .eq("store_id", storeId)
         .gte("business_date", prevMonthStart)
         .lte("business_date", prevMonthEnd),
@@ -573,7 +581,7 @@ export default function ReportPage() {
     const t = setTimeout(async () => {
       const { data } = await supabase
         .from("tabs")
-        .select("*, tab_items(*)")
+        .select("*, tab_items(*), tab_payments(*)")
         .eq("store_id", storeId)
         .ilike("name", `%${query}%`)
         .order("created_at", { ascending: false })
@@ -662,6 +670,7 @@ export default function ReportPage() {
       profit: a.profit + r.profit,
       cash: a.cash + r.cash,
       card: a.card + r.card,
+      receivable: a.receivable + r.receivable,
       unsettled: a.unsettled + r.unsettled,
       tabCount: a.tabCount + r.tabCount,
       guestCount: a.guestCount + r.guestCount,
@@ -678,6 +687,7 @@ export default function ReportPage() {
       profit: 0,
       cash: 0,
       card: 0,
+      receivable: 0,
       unsettled: 0,
       tabCount: 0,
       guestCount: 0,
@@ -745,7 +755,14 @@ export default function ReportPage() {
 
     const coupon50Today = tabRows.filter((t) => t.discount_percent === 50).length;
     const coupon50Month = monthTabsRaw.filter((t) => t.discount_percent === 50).length;
-    const monthUnsettled = monthTabsRaw.filter((t) => !t.closed_at);
+    // 今月の未収一覧：まだ会計していない伝票は合計額を、会計済みで未収の分がある伝票はその未収額を出す
+    const monthUnsettled = monthTabsRaw
+      .map((t) => {
+        const tot = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
+        const owed = t.closed_at ? tabPaymentAllocation(t, tot)?.receivable ?? 0 : tot;
+        return { name: t.name, owed };
+      })
+      .filter((t) => t.owed > 0);
 
     const tokens: Record<string, string> = {
       date: `${m}/${d}`,
@@ -753,6 +770,7 @@ export default function ReportPage() {
       expense: yen(summary.expense),
       profit: yen(summary.profit),
       card: yen(summary.card),
+      receivable: yen(summary.receivable),
       tab_count: String(tabRows.length),
       guest_count: String(tabs.reduce((a, t) => a + (t.guest_count ?? 0), 0)),
       coupon50: String(coupon50Today),
@@ -769,6 +787,7 @@ export default function ReportPage() {
       month_expense: yen(monthTotal.expense),
       month_profit: yen(monthTotal.profit),
       month_card: yen(monthTotal.card),
+      month_receivable: yen(monthTotal.receivable),
       month_tab_count: String(monthTotal.tabCount),
       month_guest_count: String(monthTotal.guestCount),
       month_coupon50: String(coupon50Month),
@@ -782,9 +801,7 @@ export default function ReportPage() {
           : "　",
       month_unsettled:
         monthUnsettled.length > 0
-          ? monthUnsettled
-              .map((t) => `${t.name}${yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit))}`)
-              .join("\n")
+          ? monthUnsettled.map((t) => `${t.name}${yen(t.owed)}`).join("\n")
           : "　",
     };
 
@@ -853,6 +870,7 @@ export default function ReportPage() {
       [
         ["現金", Math.round(summary.cash)],
         ["カード", Math.round(summary.card)],
+        ["未収", Math.round(summary.receivable)],
         ["未会計", Math.round(summary.unsettled)],
       ].forEach(([label, value]) => {
         const row = summarySheet.addRow([label, value]);
@@ -879,7 +897,9 @@ export default function ReportPage() {
           name: t.name,
           staff: staffName(t.staff_id),
           status: t.closed_at ? "会計済み" : "対応中",
-          method: t.payment_method ? PAYMENT_METHOD_LABELS[t.payment_method] : "",
+          method: tabPaymentParts(t)
+            .map((p) => `${PAYMENT_KIND_LABELS[p.method]}${p.amount != null ? Math.round(p.amount).toLocaleString() : ""}`)
+            .join("＋"),
           in: new Date(t.created_at).toLocaleTimeString("ja-JP"),
           out: t.closed_at ? new Date(t.closed_at).toLocaleTimeString("ja-JP") : "",
           count: t.tab_items.reduce((a, x) => a + x.qty, 0),
@@ -1103,7 +1123,7 @@ export default function ReportPage() {
                                 day: "numeric",
                                 weekday: "short",
                               })}
-                              {t.closed_at && ` ・${PAYMENT_METHOD_EMOJI[t.payment_method ?? "cash"]}`}
+                              {t.closed_at && ` ・${tabPaymentEmoji(t)}`}
                             </span>
                             <span className="font-mono text-gray-300 shrink-0">
                               {yen(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit))}
@@ -1156,6 +1176,8 @@ export default function ReportPage() {
           <span className="text-right mt-2">{yen(summary.cash)}</span>
           <span className="text-gray-400">カード</span>
           <span className="text-right">{yen(summary.card)}</span>
+          <span className="text-gray-400">未収</span>
+          <span className="text-right">{yen(summary.receivable)}</span>
           <span className="text-gray-400">未会計</span>
           <span className="text-right">{yen(summary.unsettled)}</span>
           <span className="text-gray-400">平均滞在時間</span>
@@ -1267,7 +1289,7 @@ export default function ReportPage() {
                 >
                   <div className="flex justify-between items-center gap-2">
                     <span className="text-gray-300 truncate">
-                      {t.closed_at ? (t.payment_method ? PAYMENT_METHOD_EMOJI[t.payment_method] : "💴") : "🕐"} {t.name}
+                      {t.closed_at ? tabPaymentEmoji(t) : "🕐"} {t.name}
                       <span className="text-xs text-gray-500">
                         {" "}
                         ・👤{mixed ? `複数（${breakdown.length}名）` : staffName(breakdown[0]?.staffId ?? t.staff_id)}
@@ -1306,6 +1328,8 @@ export default function ReportPage() {
             <span className="col-span-2 text-right text-xs text-gray-500 -mt-0.5">（消費税 {yen(monthTotal.tax)}）</span>
             <span className="text-gray-400 mt-2">カード</span>
             <span className="text-right mt-2">{yen(monthTotal.card)}</span>
+            <span className="text-gray-400">未収</span>
+            <span className="text-right">{yen(monthTotal.receivable)}</span>
             <span className="text-gray-400">平均滞在時間</span>
             <span className="text-right">{monthAvgStay != null ? formatMinutes(monthAvgStay) : "—"}</span>
           </div>
@@ -1611,11 +1635,12 @@ export default function ReportPage() {
                 </span>
               )}
               <span>担当 {staffName(viewingTab.staff_id)}</span>
-              {viewingTab.closed_at && viewingTab.payment_method && (
-                <span>
-                  {PAYMENT_METHOD_EMOJI[viewingTab.payment_method]} {PAYMENT_METHOD_LABELS[viewingTab.payment_method]}
+              {tabPaymentParts(viewingTab).map((p) => (
+                <span key={p.method}>
+                  {PAYMENT_KIND_EMOJI[p.method]} {PAYMENT_KIND_LABELS[p.method]}
+                  {p.amount != null ? ` ${yen(p.amount)}` : ""}
                 </span>
-              )}
+              ))}
             </div>
 
             {viewingTab.memo && (

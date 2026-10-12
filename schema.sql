@@ -192,7 +192,8 @@ create table tabs (
   discount_percent numeric,                             -- 割引率（例: 30 = 30%OFF、任意）
   discount_amount  numeric,                             -- 自由入力の値引き額（円、任意）
   staff_id        uuid references staff(id) on delete set null, -- この伝票の担当スタッフ（歩合給の対象）
-  companion_staff_id uuid references staff(id) on delete set null, -- この来店を同伴したスタッフ（歩合対象の担当staff_idとは別軸。クラブモード用）
+  companion_staff_id uuid references staff(id) on delete set null, -- 旧・同伴スタッフ（1人分）。companion_staff_idsの先頭と同じ値を保つ（旧版アプリとの互換用）
+  companion_staff_ids uuid[] not null default '{}', -- この来店を同伴したスタッフ（複数可。歩合対象の担当staff_idとは別軸。クラブモード用。staffは論理削除のため外部キーは張らない）
   created_at      timestamptz not null default now(),  -- 来店
   closed_at       timestamptz                          -- 退店・会計
 );
@@ -209,6 +210,19 @@ create table tab_items (
   qty         integer not null default 1 check (qty > 0),
   source      text not null default 'manual' check (source in ('menu','manual')),
   is_cast_drink boolean not null default false, -- 追加時点のメニューのキャストドリンク設定を引き継ぐ（後でメニュー側が変わっても過去分は変わらない）
+  created_at  timestamptz not null default now()
+);
+
+-- ------------------------------------------------------------
+-- 6b. 伝票の支払い内訳（分割払い・未収）。1つの伝票を現金＋カード、一部未収などで支払う場合に使う。
+--     行が無い会計済み伝票は、従来どおり tabs.payment_method の1回払いとして扱う
+-- ------------------------------------------------------------
+create table tab_payments (
+  id          uuid primary key default gen_random_uuid(),
+  store_id    uuid not null references stores(id) on delete cascade,
+  tab_id      uuid not null references tabs(id) on delete cascade,
+  method      text not null check (method in ('cash','card','paypay','other_epayment','receivable')), -- receivable=未収（後日回収する分）
+  amount      numeric not null check (amount > 0),
   created_at  timestamptz not null default now()
 );
 
@@ -305,6 +319,50 @@ $$;
 revoke all on function delete_tab_with_log(uuid) from public;
 grant execute on function delete_tab_with_log(uuid) to authenticated;
 
+-- 支払い内訳の保存と会計確定を同一トランザクションで行う（分割払い・未収用）。
+-- p_payments は [{"method":"cash","amount":3000},{"method":"receivable","amount":2000}] の形。
+-- 内訳の合計が会計金額と一致するかはアプリ側で確認する（切り上げ単位は店舗設定のためDB側では計算しない）。
+-- 会計済みの伝票に対して呼ぶと内訳だけを差し替える（closed_atは元のまま）。
+-- tabs.payment_methodには、未収以外で金額が最大の支払い方法を代表として入れる（全額未収ならnull）。
+create or replace function settle_tab(p_tab_id uuid, p_payments jsonb)
+returns void
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  target_tab tabs%rowtype;
+  main_method text;
+begin
+  select * into target_tab from tabs where id = p_tab_id for update;
+  if not found then
+    raise exception '伝票が見つからないか、更新権限がありません。';
+  end if;
+  if jsonb_typeof(p_payments) <> 'array' or jsonb_array_length(p_payments) = 0 then
+    raise exception '支払い内訳がありません。';
+  end if;
+
+  delete from tab_payments where tab_id = p_tab_id;
+  insert into tab_payments (store_id, tab_id, method, amount)
+  select target_tab.store_id, p_tab_id, e->>'method', (e->>'amount')::numeric
+  from jsonb_array_elements(p_payments) as e
+  where (e->>'amount')::numeric > 0;
+
+  select method into main_method
+  from tab_payments
+  where tab_id = p_tab_id and method <> 'receivable'
+  order by amount desc
+  limit 1;
+
+  update tabs
+  set payment_method = main_method, closed_at = coalesce(closed_at, now())
+  where id = p_tab_id;
+end;
+$$;
+
+revoke all on function settle_tab(uuid, jsonb) from public;
+grant execute on function settle_tab(uuid, jsonb) to authenticated;
+
 -- ============================================================
 -- Row Level Security（店舗間のデータ漏洩を防ぐ最重要設定）
 -- 「自分がstore_membersに登録されている店舗のデータしか見えない」ようにする
@@ -320,6 +378,7 @@ alter table customer_staff_commission_rules enable row level security;
 alter table menu_items    enable row level security;
 alter table tabs          enable row level security;
 alter table tab_items     enable row level security;
+alter table tab_payments  enable row level security;
 alter table tab_logs      enable row level security;
 alter table attendance    enable row level security;
 alter table expenses      enable row level security;
@@ -406,6 +465,12 @@ create policy "org members can view their organization's tab items"
     tab_id in (select id from tabs where store_id in (select my_org_store_ids()))
   );
 
+create policy "store members can access their tab payments"
+  on tab_payments for all using (store_id in (select my_store_ids()));
+
+create policy "org members can view their organization's tab payments"
+  on tab_payments for select using (store_id in (select my_org_store_ids()));
+
 create policy "store members can view their tab logs"
   on tab_logs for select to authenticated
   using (store_id in (select my_store_ids()));
@@ -484,6 +549,8 @@ create index if not exists idx_expenses_store_business_date on expenses(store_id
 
 -- tab_itemsはstore_idを持たないため、tabs経由のRLS/joinを速くする
 create index if not exists idx_tab_items_tab_id on tab_items(tab_id);
+create index if not exists idx_tab_payments_tab_id on tab_payments(tab_id);
+create index if not exists idx_tab_payments_store_id on tab_payments(store_id);
 
 -- my_org_store_ids()が組織側RLSポリシーの起点になるため重要
 create index if not exists idx_organization_members_user_id on organization_members(user_id);
