@@ -115,6 +115,12 @@ export default function ExpensesPage() {
 
   // 「HH:MM」を、営業日の切り替え時刻を基準に実際のカレンダー日時へ変換する
   // （切り替え時刻より前の時刻＝日付をまたいだ後の時間として扱う。例：切り替え6時なら、深夜1時は翌カレンダー日）
+  // 出退勤の選択肢（30分刻み）。営業日の切り替え時刻から始めて、深夜の時刻が営業日の後ろに並ぶようにする
+  const halfHourOptions = Array.from({ length: 48 }, (_, i) => {
+    const minutes = (cutoffHour * 60 + i * 30) % (24 * 60);
+    return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  });
+
   function timeToDate(hhmm: string): Date | null {
     const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm);
     if (!m) return null;
@@ -416,19 +422,31 @@ export default function ExpensesPage() {
               ))}
             </select>
             <div className="flex gap-2 items-center">
-              <input
-                type="time"
+              <select
                 value={attStart}
                 onChange={(e) => setAttStart(e.target.value)}
                 className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
-              />
+              >
+                <option value="">出勤</option>
+                {halfHourOptions.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
               <span className="text-gray-500 text-sm">〜</span>
-              <input
-                type="time"
+              <select
                 value={attEnd}
                 onChange={(e) => setAttEnd(e.target.value)}
                 className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
-              />
+              >
+                <option value="">退勤</option>
+                {halfHourOptions.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
             </div>
             {attError && <p className="text-rose text-xs">{attError}</p>}
             <button
