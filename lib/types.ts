@@ -159,7 +159,17 @@ export type Attendance = {
   clock_in: string;
   clock_out: string | null;
   wage_snapshot: number | null;
+  daily_pay?: number | null; // その日に日払いで渡した額（給料の前渡し。給与明細・集計の人件費から差し引く）。null=日払いなし
 };
+
+// 出退勤の記録から、スタッフごとの日払い済み合計を出す
+export function dailyPayByStaff(attendance: Pick<Attendance, "staff_id" | "daily_pay">[]): Map<string, number> {
+  const map = new Map<string, number>();
+  attendance.forEach((a) => {
+    if (a.daily_pay) map.set(a.staff_id, (map.get(a.staff_id) ?? 0) + a.daily_pay);
+  });
+  return map;
+}
 
 export type Expense = {
   id: string;

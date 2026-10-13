@@ -32,6 +32,7 @@ import {
   snackPayBreakdown,
   snackDeductions,
   snackCompanionCount,
+  dailyPayByStaff,
   tabCompanionIds,
   tabPaymentAllocation,
   tabPaymentParts,
@@ -1130,5 +1131,18 @@ describe("snack mode pay", () => {
     expect(n.deductBottleCost).toBe(true);
     expect(normalizeSnackPaySettings({ bottleBackCategories: ["ワイン", 1] }).bottleBackCategories).toEqual(["ワイン"]);
     expect(normalizeSnackPaySettings(null)).toEqual(DEFAULT_SNACK_PAY_SETTINGS);
+  });
+});
+
+describe("dailyPayByStaff", () => {
+  it("sums daily pay per staff and ignores rows without it", () => {
+    const m = dailyPayByStaff([
+      { staff_id: "a", daily_pay: 9000 },
+      { staff_id: "a", daily_pay: 13500 },
+      { staff_id: "b", daily_pay: null },
+      { staff_id: "b" },
+    ]);
+    expect(m.get("a")).toBe(22500);
+    expect(m.has("b")).toBe(false);
   });
 });

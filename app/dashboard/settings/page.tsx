@@ -43,6 +43,7 @@ import {
   snackPayBreakdown,
   snackDeductions,
   snackCompanionCount,
+  dailyPayByStaff,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
 import { StoreTheme } from "@/lib/theme";
@@ -236,6 +237,7 @@ export default function SettingsPage() {
     total: number;
     // 給与計算方法2のみ：売上バックの内訳と、名刺代・控除後の差引支給額
     snack: (ReturnType<typeof snackPayBreakdown> & ReturnType<typeof snackDeductions>) | null;
+    dailyPaid: number; // 経費タブの出勤情報で記録した、期間中の日払い済み合計
   } | null>(null);
 
   const [storeNameDraft, setStoreNameDraft] = useState(storeName ?? "");
@@ -856,6 +858,7 @@ export default function SettingsPage() {
       hourlyHours,
       hourlyCost,
       total: gross,
+      dailyPaid: dailyPayByStaff((attData as Attendance[]) ?? []).get(payslipStaffId) ?? 0,
       snack: snackPay ? { ...snackPay, ...snackDeductions(gross, snackSettings) } : null,
     });
     setGeneratingPayslip(false);
@@ -2768,6 +2771,25 @@ export default function SettingsPage() {
                         <td className="pt-4 font-bold">差引支給額</td>
                         <td className="pt-4 text-right font-mono font-bold text-lg">
                           ¥{Math.round(payslipData.snack.net).toLocaleString()}
+                        </td>
+                      </tr>
+                    </>
+                  )}
+                  {payslipData.dailyPaid > 0 && (
+                    <>
+                      <tr className="border-b border-gray-200">
+                        <td className="py-2.5">日払い済み</td>
+                        <td className="py-2.5 text-right font-mono">
+                          −¥{Math.round(payslipData.dailyPaid).toLocaleString()}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="pt-4 font-bold">残りのお渡し額</td>
+                        <td className="pt-4 text-right font-mono font-bold text-lg">
+                          ¥
+                          {Math.round(
+                            (payslipData.snack ? payslipData.snack.net : payslipData.total) - payslipData.dailyPaid
+                          ).toLocaleString()}
                         </td>
                       </tr>
                     </>

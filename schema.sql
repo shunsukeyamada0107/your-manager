@@ -252,7 +252,8 @@ create table attendance (
   business_date  date not null,
   clock_in       timestamptz not null,
   clock_out      timestamptz,
-  wage_snapshot  numeric   -- 出勤時点の時給を記録（後で時給を変更しても過去分は変わらない）
+  wage_snapshot  numeric,  -- 出勤時点の時給を記録（後で時給を変更しても過去分は変わらない）
+  daily_pay      numeric check (daily_pay >= 0) -- その日に日払いで渡した額（給料の前渡し。給与明細・集計の人件費から差し引く）。null=日払いなし
 );
 
 -- ------------------------------------------------------------

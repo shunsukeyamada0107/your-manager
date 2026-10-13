@@ -75,6 +75,9 @@ export default function ExpensesPage() {
   const [attStaffId, setAttStaffId] = useState("");
   const [attStart, setAttStart] = useState("");
   const [attEnd, setAttEnd] = useState("");
+  // 日払いの入力中の出勤記録と金額
+  const [dailyPayEditId, setDailyPayEditId] = useState<string | null>(null);
+  const [dailyPayDraft, setDailyPayDraft] = useState("");
   const [attError, setAttError] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
@@ -166,6 +169,21 @@ export default function ExpensesPage() {
     setAttStaffId("");
     setAttStart("");
     setAttEnd("");
+    loadData();
+  }
+
+  async function saveDailyPay(id: string) {
+    const raw = dailyPayDraft.replace(/[^0-9]/g, "");
+    const { error } = await supabase
+      .from("attendance")
+      .update({ daily_pay: raw === "" || Number(raw) === 0 ? null : Number(raw) })
+      .eq("id", id);
+    if (error) {
+      setAttError("日払いを保存できませんでした。通信状態を確認して、もう一度お試しください。");
+      return;
+    }
+    setDailyPayEditId(null);
+    setDailyPayDraft("");
     loadData();
   }
 
@@ -467,19 +485,52 @@ export default function ExpensesPage() {
                 const hrs = attHours(a);
                 const inS = new Date(a.clock_in);
                 const outS = a.clock_out ? new Date(a.clock_out) : null;
+                const editing = dailyPayEditId === a.id;
                 return (
-                  <div key={a.id} className="flex justify-between items-center px-3 py-2 text-sm">
-                    <span className="text-gray-300">
-                      {staffName(a.staff_id)}{" "}
-                      {inS.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}〜
-                      {outS ? outS.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) : "未入力"}
-                    </span>
-                    <span className="font-mono text-gray-400 flex items-center gap-2">
-                      {hrs.toFixed(1)}h
-                      <button onClick={() => deleteAttendance(a.id)} className="text-rose">
-                        ✕
-                      </button>
-                    </span>
+                  <div key={a.id} className="px-3 py-2 text-sm space-y-2">
+                    <div className="flex justify-between items-center gap-2">
+                      <span className="text-gray-300">
+                        {staffName(a.staff_id)}{" "}
+                        {inS.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}〜
+                        {outS ? outS.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) : "未入力"}
+                      </span>
+                      <span className="font-mono text-gray-400 flex items-center gap-2 shrink-0">
+                        {hrs.toFixed(1)}h
+                        <button
+                          onClick={() => {
+                            setDailyPayEditId(editing ? null : a.id);
+                            setDailyPayDraft(a.daily_pay ? String(a.daily_pay) : "");
+                          }}
+                          className={`text-xs rounded-md border px-2 py-1 ${
+                            a.daily_pay ? "border-gold text-gold bg-gold/10" : "border-line text-gray-400"
+                          }`}
+                        >
+                          {a.daily_pay ? `日払い ¥${a.daily_pay.toLocaleString()}` : "日払い"}
+                        </button>
+                        <button onClick={() => deleteAttendance(a.id)} className="text-rose">
+                          ✕
+                        </button>
+                      </span>
+                    </div>
+                    {editing && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400 shrink-0">日払いで渡した額</span>
+                        <input
+                          value={dailyPayDraft}
+                          onChange={(e) => setDailyPayDraft(e.target.value.replace(/[^0-9]/g, ""))}
+                          inputMode="numeric"
+                          placeholder="0"
+                          autoFocus
+                          className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1.5 text-right font-mono"
+                        />
+                        <button
+                          onClick={() => saveDailyPay(a.id)}
+                          className="shrink-0 rounded-md bg-gold text-bg px-3 py-1.5 text-xs font-bold"
+                        >
+                          保存
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}

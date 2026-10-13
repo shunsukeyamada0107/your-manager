@@ -28,6 +28,7 @@ import {
   daySummary,
   staffCommissionBreakdown,
   hourlyLaborBreakdown,
+  dailyPayByStaff,
   commissionTaxBasisResolver,
   totalSalesCommissionStaff,
   commissionRateResolver,
@@ -336,10 +337,16 @@ type LaborRow = {
   drinkBack: number | null;
   drinkCount: number | null;
   total: number;
+  dailyPaid: number; // 日払いで渡し済みの額
 };
 
 // 時給人件費と歩合給を人別にまとめる（両方持つ人はどちらも表示）
-function buildLaborRows(hourly: HourlyLaborRow[], comm: StaffCommission[], staffList: Staff[]): LaborRow[] {
+function buildLaborRows(
+  hourly: HourlyLaborRow[],
+  comm: StaffCommission[],
+  staffList: Staff[],
+  dailyPaid: Map<string, number> = new Map()
+): LaborRow[] {
   const ids = Array.from(
     new Set([...hourly.map((h) => h.staffId), ...comm.map((c) => c.staffId).filter((id): id is string => !!id)])
   );
@@ -359,6 +366,7 @@ function buildLaborRows(hourly: HourlyLaborRow[], comm: StaffCommission[], staff
         drinkBack: c?.drinkBack ?? null,
         drinkCount: c?.drinkCount ?? null,
         total: (h?.cost ?? 0) + (c?.commission ?? 0),
+        dailyPaid: dailyPaid.get(id) ?? 0,
       };
     })
     .sort((a, b) => b.total - a.total);
@@ -686,7 +694,9 @@ export default function ReportPage() {
     roundUnit
   );
   const hourlyLabor = hourlyLaborBreakdown(attendance, staffName);
-  const laborRows = buildLaborRows(hourlyLabor, commission, staff);
+  const laborRows = buildLaborRows(hourlyLabor, commission, staff, dailyPayByStaff(attendance));
+  // その営業日に日払いでレジから渡した合計（現金精算でレジの現金から差し引く）
+  const dayDailyPaid = attendance.reduce((a, x) => a + (x.daily_pay ?? 0), 0);
   const tabRows = [...tabs].sort(
     (a, b) => Number(!!a.closed_at) - Number(!!b.closed_at) || tabSubtotal(b.tab_items) - tabSubtotal(a.tab_items)
   );
@@ -744,7 +754,7 @@ export default function ReportPage() {
     roundUnit
   );
   const monthHourlyLabor = hourlyLaborBreakdown(monthAttRaw, staffName);
-  const monthLaborRows = buildLaborRows(monthHourlyLabor, monthCommission, staff);
+  const monthLaborRows = buildLaborRows(monthHourlyLabor, monthCommission, staff, dailyPayByStaff(monthAttRaw));
 
   const todayAvgStay = avgStayMinutes(tabs);
   const monthAvgStay = avgStayMinutes(monthTabsRaw);
@@ -1039,6 +1049,8 @@ export default function ReportPage() {
         { header: "時給人件費", key: "hourlyCost", width: 14 },
         { header: "歩合給", key: "commission", width: 14 },
         { header: "合計", key: "total", width: 14 },
+        { header: "日払い済み", key: "dailyPaid", width: 14 },
+        { header: "残り", key: "remaining", width: 14 },
       ];
       styleHeaderRow(monthLaborSheet.getRow(1));
       monthLaborRows.forEach((r, i) => {
@@ -1048,8 +1060,12 @@ export default function ReportPage() {
           hourlyCost: r.hourlyCost != null ? Math.round(r.hourlyCost) : "",
           commission: r.commission != null ? Math.round(r.commission) : "",
           total: Math.round(r.total),
+          dailyPaid: Math.round(r.dailyPaid),
+          remaining: Math.round(r.total - r.dailyPaid),
         });
-        ["hourlyCost", "commission", "total"].forEach((k) => (row.getCell(k).numFmt = '"¥"#,##0'));
+        ["hourlyCost", "commission", "total", "dailyPaid", "remaining"].forEach(
+          (k) => (row.getCell(k).numFmt = '"¥"#,##0')
+        );
         row.getCell("total").font = { bold: true, color: { argb: GOLD } };
         styleDataRow(row, i % 2 === 1);
       });
@@ -1233,12 +1249,18 @@ export default function ReportPage() {
           <span className="text-right">{yen(summary.cash)}</span>
           <span className="text-gray-400">経費（現金支払い分）</span>
           <span className="text-right">−{yen(summary.expense)}</span>
+          {dayDailyPaid > 0 && (
+            <>
+              <span className="text-gray-400">日払い（レジから）</span>
+              <span className="text-right">−{yen(dayDailyPaid)}</span>
+            </>
+          )}
           <span className="text-gray-300 font-bold">封筒に入れる現金</span>
-          <span className="text-right text-gold font-bold">{yen(summary.cash - summary.expense)}</span>
+          <span className="text-right text-gold font-bold">{yen(summary.cash - summary.expense - dayDailyPaid)}</span>
           <span className="text-gray-400 mt-2">金庫に残す現金（釣り銭元金）</span>
           <span className="text-right mt-2">{yen(cashFloatAmount)}</span>
           <span className="text-gray-400">レジにあるはずの現金合計</span>
-          <span className="text-right">{yen(summary.cash - summary.expense + cashFloatAmount)}</span>
+          <span className="text-right">{yen(summary.cash - summary.expense - dayDailyPaid + cashFloatAmount)}</span>
         </div>
       </div>
 
@@ -1280,6 +1302,11 @@ export default function ReportPage() {
                   ) : (
                     <div className="text-xs text-gray-400">売上（歩合給） {yen(r.commission)}</div>
                   ))}
+                {r.dailyPaid > 0 && (
+                  <div className="text-xs text-warn">
+                    日払い済み {yen(r.dailyPaid)} ・ 残り {yen(r.total - r.dailyPaid)}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1421,6 +1448,11 @@ export default function ReportPage() {
                     ) : (
                       <div className="text-xs text-gray-400">売上（歩合給） {yen(r.commission)}</div>
                     ))}
+                  {r.dailyPaid > 0 && (
+                    <div className="text-xs text-warn">
+                      日払い済み {yen(r.dailyPaid)} ・ 残り {yen(r.total - r.dailyPaid)}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
