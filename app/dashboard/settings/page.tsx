@@ -810,7 +810,8 @@ export default function SettingsPage() {
     // 給与計算方法2は伝票の同伴料の品目でも数える（品目が無い伝票は同伴ボタンで数える）
     const companionAllowance = isTieredPayMethod
       ? snackCompanionCount((tabsData as TabWithItems[]) ?? [], (customersData as Customer[]) ?? [], menu, payslipStaffId) *
-        (s.companion_allowance_amount ?? 0)
+        // 同伴料は全額その子へ。スタッフごとの単価が未設定ならメニューの同伴料の金額を使う
+        (s.companion_allowance_amount ?? menu.find((m) => m.snack_item_kind === "companion")?.price ?? 0)
       : storeMode === "club"
         ? companionAllowanceBreakdown(
             (tabsData as TabWithItems[]) ?? [],
@@ -831,7 +832,6 @@ export default function SettingsPage() {
           menu,
           snackSettings,
           payslipStaffId,
-          companionAllowance,
           taxRate
         )
       : null;
@@ -1093,12 +1093,17 @@ export default function SettingsPage() {
                 {num(d.stepAmount, (v) => set({ stepAmount: v }), "円ごとに")}
                 {num(d.stepRate, (v) => set({ stepRate: v }), "%ずつ上がる（上限なし）", 100)}
               </div>
+              {check(
+                "salesIncludeTax",
+                "売上を消費税・テーブルチャージ込み（お会計の金額）で数える",
+                "外すと、税・テーブルチャージ抜きの小計で数えます"
+              )}
               {check("deductBottleCost", "酒代（ボトルの原価）を引く", "原価はメニュー管理でボトルごとに入力します")}
-              {check("deductCompanion", "同伴代（同伴手当の合計）を引く")}
+              {check("deductCompanion", "同伴料を売上から除く（同伴料は全額その子の同伴手当になります）")}
               {check("includeNominationInSales", "指名料も売上に含める")}
               {check("includeBottleToOthersInSales", "指名のお客様が他の子に下ろしたボトルも、指名の子の売上に含める")}
               <div className="text-xs text-gray-500">
-                率は差し引いた後の金額で決まり、その金額全体に掛けます（例：33.6万円 → 3%）。金額は消費税・テーブルチャージ抜きです。
+                率は差し引いた後の金額で決まり、その金額全体に掛けます（例：33.6万円 → 3%）。
               </div>
             </div>
           )}

@@ -906,6 +906,7 @@ export type SnackPaySettings = {
   salesBackEnabled: boolean; // キャスト売上バック（指名客の売上に段階率）
   stepAmount: number; // この金額ごとに率が上がる（例: 100000）
   stepRate: number; // 1段ごとに上がる率（例: 0.01）。上限なし
+  salesIncludeTax: boolean; // 売上バックの元の売上を、消費税・テーブルチャージ込み（お会計の金額）で数える。false=税・TC抜きの小計
   deductBottleCost: boolean; // 売上バックの元から酒代（ボトルの原価）を引く
   deductCompanion: boolean; // 売上バックの元から同伴代（その期間の同伴手当の合計）を引く
   includeNominationInSales: boolean; // 指名料を売上バックの元の売上に含める
@@ -923,6 +924,7 @@ export const DEFAULT_SNACK_PAY_SETTINGS: SnackPaySettings = {
   salesBackEnabled: true,
   stepAmount: 100000,
   stepRate: 0.01,
+  salesIncludeTax: false,
   deductBottleCost: true,
   deductCompanion: true,
   includeNominationInSales: false,
@@ -959,9 +961,9 @@ export function snackSalesBackRate(amount: number, stepAmount: number, stepRate:
 }
 
 export type SnackPayBreakdown = {
-  nominatedSales: number; // 指名客の売上（税・テーブルチャージ抜き、割引反映後）
+  nominatedSales: number; // 指名客の売上（割引反映後。salesIncludeTaxなら税・テーブルチャージ込み、それ以外は抜き）
   bottleCost: number; // 引いた酒代
-  companionDeduction: number; // 引いた同伴代
+  companionDeduction: number; // 売上から除いた同伴料（伝票の同伴料の品目。同伴手当として別にその子へ渡す）
   salesBackBase: number; // 売上バックの元（上の差し引き後）
   salesBackRate: number;
   salesBack: number;
@@ -1002,14 +1004,13 @@ export function tabSalesShares(
 }
 
 // 1人分の給与計算方法2の歩合。指名客＝customers.primary_staff_idがこの人の顧客。
-// 金額はすべて税・テーブルチャージ抜きの小計（伝票の割引は割合で反映）。会計済みの伝票だけを数える
+// 伝票の割引は割合で反映（指名料バックだけは値引きに関係なく品目の金額そのまま）。会計済みの伝票だけを数える
 export function snackPayBreakdown(
   tabs: TabWithItems[],
   customers: Pick<Customer, "id" | "primary_staff_id">[],
   menuItems: MenuItem[],
   settings: SnackPaySettings,
   staffId: string,
-  companionAllowanceTotal: number,
   taxRate: number = DEFAULT_TAX_RATE
 ): SnackPayBreakdown {
   const primaryOf = new Map(customers.map((c) => [c.id, c.primary_staff_id]));
@@ -1018,6 +1019,7 @@ export function snackPayBreakdown(
   let bottleCost = 0;
   let bottleBack = 0;
   let nominationBack = 0;
+  let companionDeduction = 0;
 
   tabs.forEach((t) => {
     if (!t.closed_at) return;
@@ -1031,13 +1033,23 @@ export function snackPayBreakdown(
 
     t.tab_items.forEach((i) => {
       const amount = itemSubtotal(i) * keepRatio;
+      // 指名売上に入れる額。設定によりお会計の金額（税・TC込み）で数える（ボトルバックは常に税・TC抜きの販売価格）
+      const salesAmount = settings.salesIncludeTax ? amount * (1 + taxRate) : amount;
       const menu = menuOf(i);
       const kind = menu?.snack_item_kind ?? null;
 
       if (kind === "nomination") {
-        // 指名料：品目の担当（無ければ指名の子）に全額
-        if (settings.nominationFullBack && (i.staff_id ?? nominator ?? t.staff_id) === staffId) nominationBack += amount;
-        if (settings.includeNominationInSales) nominatedSales += amount * myShare;
+        // 指名料：品目の担当（無ければ指名の子）に、値引きに関係なく品目の金額をそのまま全額
+        if (settings.nominationFullBack && (i.staff_id ?? nominator ?? t.staff_id) === staffId)
+          nominationBack += itemSubtotal(i);
+        if (settings.includeNominationInSales) nominatedSales += salesAmount * myShare;
+        return;
+      }
+
+      if (kind === "companion") {
+        // 同伴料：同伴手当としてその子に渡すので、設定により売上バックの元から除く（お会計に乗った金額のまま）
+        nominatedSales += salesAmount * myShare;
+        if (settings.deductCompanion) companionDeduction += salesAmount * myShare;
         return;
       }
 
@@ -1050,18 +1062,17 @@ export function snackPayBreakdown(
         if (settings.bottleBackEnabled && backTarget && toOther && i.staff_id === staffId)
           bottleBack += amount * settings.bottleBackRate;
         if (!toOther || settings.includeBottleToOthersInSales) {
-          nominatedSales += amount * myShare;
+          nominatedSales += salesAmount * myShare;
           bottleCost += (menu?.cost_price ?? 0) * i.qty * myShare;
         }
         return;
       }
 
-      nominatedSales += amount * myShare;
+      nominatedSales += salesAmount * myShare;
     });
   });
 
   const deductedCost = settings.deductBottleCost ? bottleCost : 0;
-  const companionDeduction = settings.deductCompanion ? companionAllowanceTotal : 0;
   const salesBackBase = Math.max(0, nominatedSales - deductedCost - companionDeduction);
   const salesBackRate = settings.salesBackEnabled
     ? snackSalesBackRate(salesBackBase, settings.stepAmount, settings.stepRate)
