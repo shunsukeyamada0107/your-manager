@@ -223,6 +223,7 @@ create table tab_payments (
   tab_id      uuid not null references tabs(id) on delete cascade,
   method      text not null check (method in ('cash','card','paypay','other_epayment','receivable')), -- receivable=未収（後日回収する分）
   amount      numeric not null check (amount > 0),
+  staff_id    uuid references staff(id) on delete set null, -- この支払いをしたお客様の担当（分割払いで支払った人ごとに担当が違う場合。給与計算方法2で売上を金額の割合で分ける）。null=伝票の指名の子
   created_at  timestamptz not null default now()
 );
 
@@ -343,8 +344,8 @@ begin
   end if;
 
   delete from tab_payments where tab_id = p_tab_id;
-  insert into tab_payments (store_id, tab_id, method, amount)
-  select target_tab.store_id, p_tab_id, e->>'method', (e->>'amount')::numeric
+  insert into tab_payments (store_id, tab_id, method, amount, staff_id)
+  select target_tab.store_id, p_tab_id, e->>'method', (e->>'amount')::numeric, nullif(e->>'staff_id', '')::uuid
   from jsonb_array_elements(p_payments) as e
   where (e->>'amount')::numeric > 0;
 

@@ -1071,6 +1071,52 @@ describe("snack mode pay", () => {
     expect(snackCompanionCount(noItem, customers, m, "b")).toBe(1);
   });
 
+  it("bottle back only for the chosen categories (e.g. wine/champagne), cost still deducted for all bottles", () => {
+    const m = [
+      menu({ name: "吉四六", price: 13000, cost_price: 4000, snack_item_kind: "bottle", category: "麦" }),
+      menu({ name: "モエ", price: 35000, cost_price: 9000, snack_item_kind: "bottle", category: "シャンパン" }),
+    ];
+    const tabs = [
+      tab({
+        customer_id: "c-shop",
+        tab_items: [item({ name: "吉四六", price: 13000, staff_id: "a" }), item({ name: "モエ", price: 35000, staff_id: "a" })],
+      }),
+      tab({ customer_id: "c-a", tab_items: [item({ name: "吉四六", price: 13000 })] }),
+    ];
+    const only = { ...s, bottleBackCategories: ["ワイン", "シャンパン"] };
+    const r = snackPayBreakdown(tabs, customers, m, only, "a", 0);
+    expect(r.bottleBack).toBeCloseTo(3500); // モエだけ10%
+    expect(r.bottleCost).toBe(4000); // 自分の指名客の吉四六の原価は引く
+    expect(snackPayBreakdown(tabs, customers, m, s, "a", 0).bottleBack).toBeCloseTo(4800); // 空=全ボトル
+  });
+
+  it("split payment: each payer's 担当 gets their share of the tab's sales", () => {
+    const pay = (amount: number, staff_id: string | null) => ({
+      id: Math.random().toString(36),
+      store_id: "store-1",
+      tab_id: "t",
+      method: "cash" as const,
+      amount,
+      staff_id,
+      created_at: "",
+    });
+    const tabs = [
+      tab({
+        customer_id: "c-a",
+        tab_items: [item({ name: "SET", price: 13000, qty: 5 }), item({ name: "ヴーヴ", price: 30000 })], // 95,000
+        tab_payments: [pay(70000, "a"), pay(30000, "b")],
+      }),
+    ];
+    const a = snackPayBreakdown(tabs, customers, menus, s, "a", 0);
+    const b = snackPayBreakdown(tabs, customers, menus, s, "b", 0);
+    expect(a.nominatedSales).toBeCloseTo(95000 * 0.7);
+    expect(b.nominatedSales).toBeCloseTo(95000 * 0.3);
+    expect(a.bottleCost + b.bottleCost).toBeCloseTo(8000);
+    // 担当が空の支払いは指名の子の分
+    const t2 = [{ ...tabs[0], tab_payments: [pay(70000, null), pay(30000, "b")] }];
+    expect(snackPayBreakdown(t2, customers, menus, s, "a", 0).nominatedSales).toBeCloseTo(95000 * 0.7);
+  });
+
   it("deducts the business card fee first, then 10% of the rest", () => {
     const d = snackDeductions(319080, s);
     expect(d.businessCardFee).toBe(3000);
@@ -1082,6 +1128,7 @@ describe("snack mode pay", () => {
     const n = normalizeSnackPaySettings({ stepRate: 0.02, deductBottleCost: "yes" });
     expect(n.stepRate).toBe(0.02);
     expect(n.deductBottleCost).toBe(true);
+    expect(normalizeSnackPaySettings({ bottleBackCategories: ["ワイン", 1] }).bottleBackCategories).toEqual(["ワイン"]);
     expect(normalizeSnackPaySettings(null)).toEqual(DEFAULT_SNACK_PAY_SETTINGS);
   });
 });

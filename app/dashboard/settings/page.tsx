@@ -713,7 +713,7 @@ export default function SettingsPage() {
     const [{ data: tabsData }, { data: attData }, { data: ruleRows }, { data: customersData }] = await Promise.all([
       supabase
         .from("tabs")
-        .select("*, tab_items(*)")
+        .select("*, tab_items(*), tab_payments(*)")
         .eq("store_id", storeId)
         .gte("business_date", start)
         .lte("business_date", end)
@@ -1033,6 +1033,10 @@ export default function SettingsPage() {
 
   function renderSnackSettingsPanel() {
     const d = snackSettingsDraft;
+    // ボトル扱いにしたメニューのカテゴリ（ボトルバックの対象を選ぶチェック用）
+    const bottleCategories = Array.from(
+      new Set(menu.filter((m) => m.snack_item_kind === "bottle").map((m) => m.category ?? UNCATEGORIZED_LABEL))
+    );
     const set = (patch: Partial<SnackPaySettings>) => setSnackSettingsDraft((cur) => ({ ...cur, ...patch }));
     const check = (key: keyof SnackPaySettings, label: string, note?: string) => (
       <label className="flex items-start gap-2 text-sm text-gray-300">
@@ -1097,8 +1101,35 @@ export default function SettingsPage() {
           )}
           {check("bottleBackEnabled", "ボトルバック（指名ではないお客様が、その子にボトルを下ろした時）")}
           {d.bottleBackEnabled && (
-            <div className="pl-6 flex items-center gap-2 text-sm text-gray-300">
-              販売価格 ×{num(d.bottleBackRate, (v) => set({ bottleBackRate: v }), "%（酒代は引かない）", 100)}
+            <div className="pl-6 space-y-2">
+              <div className="flex items-center gap-2 text-sm text-gray-300">
+                販売価格 ×{num(d.bottleBackRate, (v) => set({ bottleBackRate: v }), "%（酒代は引かない）", 100)}
+              </div>
+              {bottleCategories.length > 0 && (
+                <div>
+                  <div className="text-xs text-gray-400 mb-1">
+                    バックの対象にするカテゴリ（どれも選ばなければ、ボトル扱いの品目すべて）
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                    {bottleCategories.map((c) => (
+                      <label key={c} className="flex items-center gap-1.5 text-sm text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={d.bottleBackCategories.includes(c)}
+                          onChange={(e) =>
+                            set({
+                              bottleBackCategories: e.target.checked
+                                ? [...d.bottleBackCategories, c]
+                                : d.bottleBackCategories.filter((x) => x !== c),
+                            })
+                          }
+                        />
+                        {c}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {check("nominationFullBack", "指名料を全額その子のバックにする")}

@@ -235,9 +235,9 @@ function POSPageInner() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [justCreatedTabId, setJustCreatedTabId] = useState<string | null>(null);
   const [pendingSettleMethod, setPendingSettleMethod] = useState<PaymentMethod | null>(null);
-  // 分割払い・未収の入力（支払い区分ごとの金額）。splitTabIdがある間だけ内訳入力の画面を開く
+  // 分割払い・未収の入力（支払った人ごとに1行：支払い方法・金額・担当）。splitTabIdがある間だけ内訳入力の画面を開く
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
-  const [splitAmounts, setSplitAmounts] = useState<Record<string, string>>({});
+  const [splitRows, setSplitRows] = useState<{ method: PaymentKind; amount: string; staffId: string }[]>([]);
   const [splitSaving, setSplitSaving] = useState(false);
   const [modalName, setModalName] = useState("");
   const [nameSearchResults, setNameSearchResults] = useState<TabWithItems[]>([]);
@@ -995,11 +995,10 @@ function POSPageInner() {
   // 分割払い・未収の内訳入力を開く。会計済みの伝票なら今の内訳を初期値にして、後から内訳を直せるようにする
   function openSplitSettle(tab: TabWithItems) {
     const total = tabTotal(tab.tab_items, taxRate, tab.discount_percent, tab.discount_amount, roundUnit);
-    const initial: Record<string, string> = {};
-    tabPaymentParts(tab).forEach((p) => {
-      initial[p.method] = String(Math.round(p.amount ?? total));
-    });
-    setSplitAmounts(initial);
+    const initial = tab.tab_payments?.length
+      ? tab.tab_payments.map((p) => ({ method: p.method, amount: String(Math.round(p.amount)), staffId: p.staff_id ?? "" }))
+      : tabPaymentParts(tab).map((p) => ({ method: p.method, amount: String(Math.round(p.amount ?? total)), staffId: "" }));
+    setSplitRows(initial.length ? initial : [{ method: "cash", amount: "", staffId: "" }]);
     setSplitTabId(tab.id);
     setShowEpaymentPicker(false);
     setOperationError(null);
@@ -1009,10 +1008,9 @@ function POSPageInner() {
     const tab = tabs.find((t) => t.id === splitTabId);
     if (!tab) return;
     const total = tabTotal(tab.tab_items, taxRate, tab.discount_percent, tab.discount_amount, roundUnit);
-    const entries = PAYMENT_KIND_ORDER.map((method) => ({
-      method,
-      amount: Math.round(Number(splitAmounts[method] || 0)),
-    })).filter((e) => e.amount > 0);
+    const entries = splitRows
+      .map((r) => ({ method: r.method, amount: Math.round(Number(r.amount || 0)), staff_id: r.staffId || null }))
+      .filter((e) => e.amount > 0);
     const sum = entries.reduce((a, e) => a + e.amount, 0);
     if (entries.some((e) => !Number.isFinite(e.amount)) || sum !== total) return;
     setSplitSaving(true);
@@ -2026,12 +2024,14 @@ function POSPageInner() {
               k === "cash" ||
               k === "receivable" ||
               enabledEpaymentMethods.some((m) => m.method === k) ||
-              Number(splitAmounts[k] || 0) > 0
+              splitRows.some((r) => r.method === k)
           );
-          const amountOf = (k: PaymentKind) => Math.round(Number(splitAmounts[k] || 0));
-          const sum = kinds.reduce((a, k) => a + amountOf(k), 0);
+          const amountOf = (r: { amount: string }) => Math.round(Number(r.amount || 0));
+          const sum = splitRows.reduce((a, r) => a + amountOf(r), 0);
           const remaining = total - sum;
-          const valid = total > 0 && remaining === 0 && kinds.every((k) => Number.isFinite(amountOf(k)));
+          const valid = total > 0 && remaining === 0 && splitRows.every((r) => Number.isFinite(amountOf(r)));
+          const updateRow = (idx: number, patch: Partial<{ method: PaymentKind; amount: string; staffId: string }>) =>
+            setSplitRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
           const wasClosed = !!tab.closed_at;
           return (
             <div
@@ -2047,7 +2047,7 @@ function POSPageInner() {
                     {wasClosed ? "お支払い内訳を変更" : "分割払い・未収で会計"}
                   </div>
                   <div className="text-xs text-gray-400 mt-1">
-                    支払い方法ごとの金額を入れて、合計をお会計金額に合わせてください
+                    支払う人（支払い方法）ごとに金額を入れて、合計をお会計金額に合わせてください
                   </div>
                 </div>
                 <div className="flex justify-between items-baseline">
@@ -2055,33 +2055,87 @@ function POSPageInner() {
                   <span className="font-mono font-bold text-gold text-2xl">¥{total.toLocaleString()}</span>
                 </div>
                 <div className="space-y-2.5">
-                  {kinds.map((k) => (
-                    <div key={k} className="flex items-center gap-2">
-                      <span className={`w-24 shrink-0 text-sm ${k === "receivable" ? "text-warn font-bold" : "text-gray-200"}`}>
-                        {PAYMENT_KIND_EMOJI[k]} {PAYMENT_KIND_LABELS[k]}
-                      </span>
-                      <input
-                        value={splitAmounts[k] ?? ""}
-                        onChange={(e) =>
-                          setSplitAmounts((m) => ({ ...m, [k]: e.target.value.replace(/[^0-9]/g, "") }))
-                        }
-                        inputMode="numeric"
-                        placeholder="0"
-                        className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2.5 py-2 text-right font-mono text-base"
-                      />
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setSplitAmounts((m) => ({ ...m, [k]: String(Math.max(0, amountOf(k) + remaining)) }))
-                        }
-                        disabled={remaining <= 0}
-                        className="shrink-0 text-xs rounded-md border border-line px-2 py-2 text-gray-300 disabled:opacity-40"
-                      >
-                        残り
-                      </button>
+                  {splitRows.map((r, idx) => (
+                    <div key={idx} className="rounded-lg border border-line p-2 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={r.method}
+                          onChange={(e) => updateRow(idx, { method: e.target.value as PaymentKind })}
+                          className={`w-28 shrink-0 rounded-md bg-bg2 border border-line px-1.5 py-2 text-sm ${
+                            r.method === "receivable" ? "text-warn font-bold" : "text-gray-200"
+                          }`}
+                        >
+                          {kinds.map((k) => (
+                            <option key={k} value={k}>
+                              {PAYMENT_KIND_EMOJI[k]} {PAYMENT_KIND_LABELS[k]}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          value={r.amount}
+                          onChange={(e) => updateRow(idx, { amount: e.target.value.replace(/[^0-9]/g, "") })}
+                          inputMode="numeric"
+                          placeholder="0"
+                          className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2.5 py-2 text-right font-mono text-base"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => updateRow(idx, { amount: String(Math.max(0, amountOf(r) + remaining)) })}
+                          disabled={remaining <= 0}
+                          className="shrink-0 text-xs rounded-md border border-line px-2 py-2 text-gray-300 disabled:opacity-40"
+                        >
+                          残り
+                        </button>
+                      </div>
+                      {(storeMode === "club" || splitRows.length > 1) && (
+                        <div className="flex items-center gap-2">
+                          {storeMode === "club" && (
+                            <select
+                              value={r.staffId}
+                              onChange={(e) => updateRow(idx, { staffId: e.target.value })}
+                              className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-1.5 py-1.5 text-xs text-gray-300"
+                            >
+                              <option value="">担当：伝票の指名の子</option>
+                              {staff
+                                .filter((st) => st.active)
+                                .map((st) => (
+                                  <option key={st.id} value={st.id}>
+                                    担当：{st.name}
+                                  </option>
+                                ))}
+                            </select>
+                          )}
+                          {splitRows.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => setSplitRows((rows) => rows.filter((_, i) => i !== idx))}
+                              className="ml-auto shrink-0 text-xs text-rose px-2 py-1"
+                            >
+                              削除
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSplitRows((rows) => [
+                        ...rows,
+                        { method: "cash", amount: remaining > 0 ? String(remaining) : "", staffId: "" },
+                      ])
+                    }
+                    className="w-full rounded-md border border-dashed border-line py-2 text-sm text-gray-300"
+                  >
+                    ＋ 支払う人を追加
+                  </button>
                 </div>
+                {storeMode === "club" && (
+                  <div className="text-xs text-gray-500">
+                    支払った人ごとに担当を選ぶと、給与計算方法2では金額の割合でそれぞれの子の売上になります（空欄は伝票の指名の子）。
+                  </div>
+                )}
                 <div className="text-xs text-gray-500">
                   「未収」は後日お支払いいただく分です。回収できたら、この画面で「お支払い内訳を変更」から現金やカードに入れ替えてください。
                 </div>

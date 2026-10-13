@@ -96,6 +96,7 @@ export type TabPayment = {
   tab_id: string;
   method: PaymentKind;
   amount: number;
+  staff_id?: string | null; // この支払いをしたお客様の担当（分割払いで支払った人ごとに担当が違う場合）。null=伝票の指名の子
   created_at: string;
 };
 
@@ -901,6 +902,7 @@ export type SnackPaySettings = {
   includeBottleToOthersInSales: boolean; // 指名客が他の子に下ろしたボトルも、指名の子の売上に含める
   bottleBackEnabled: boolean; // 自分の指名客以外からボトルを下ろしてもらった時のバック
   bottleBackRate: number; // そのバック率（例: 0.10。販売価格に掛ける、原価は引かない）
+  bottleBackCategories: string[]; // ボトルバックの対象にするメニューのカテゴリ（例: ワイン・シャンパン）。空=ボトル扱いの品目すべて
   nominationFullBack: boolean; // 指名料を全額その子のバックにする
   businessCardFee: number; // 毎月差し引く名刺代（円）
   deductionRate: number; // （支給合計−名刺代）に掛ける控除率（例: 0.10）
@@ -917,6 +919,7 @@ export const DEFAULT_SNACK_PAY_SETTINGS: SnackPaySettings = {
   includeBottleToOthersInSales: true,
   bottleBackEnabled: true,
   bottleBackRate: 0.1,
+  bottleBackCategories: [],
   nominationFullBack: true,
   businessCardFee: 3000,
   deductionRate: 0.1,
@@ -928,6 +931,10 @@ export function normalizeSnackPaySettings(raw: unknown): SnackPaySettings {
   const out = { ...DEFAULT_SNACK_PAY_SETTINGS };
   (Object.keys(DEFAULT_SNACK_PAY_SETTINGS) as (keyof SnackPaySettings)[]).forEach((k) => {
     const v = r[k];
+    if (Array.isArray(DEFAULT_SNACK_PAY_SETTINGS[k])) {
+      if (Array.isArray(v)) (out as Record<string, unknown>)[k] = v.filter((x) => typeof x === "string");
+      return;
+    }
     if (typeof v === typeof DEFAULT_SNACK_PAY_SETTINGS[k] && (typeof v !== "number" || Number.isFinite(v))) {
       (out as Record<string, unknown>)[k] = v;
     }
@@ -964,6 +971,26 @@ export function snackMenuResolver(menuItems: MenuItem[]) {
   return (item: Pick<TabItem, "name" | "price">) => byNamePrice.get(`${item.name}\u0000${item.price}`) ?? byName.get(item.name) ?? null;
 }
 
+// 伝票の売上を誰の指名売上にするかの割合。分割払いで支払った人ごとに担当（tab_payments.staff_id）が入っていれば、
+// その支払い金額の比率で分ける（担当が空の支払いは伝票の指名の子の分）。分割の担当が無ければ指名の子が丸ごと（1）
+export function tabSalesShares(
+  t: Pick<Tab, "tab_payments">,
+  nominator: string | null
+): Map<string, number> {
+  const shares = new Map<string, number>();
+  const payments = (t.tab_payments ?? []).filter((p) => p.amount > 0);
+  const total = payments.reduce((a, p) => a + p.amount, 0);
+  if (total > 0 && payments.some((p) => p.staff_id)) {
+    payments.forEach((p) => {
+      const owner = p.staff_id ?? nominator;
+      if (owner) shares.set(owner, (shares.get(owner) ?? 0) + p.amount / total);
+    });
+    return shares;
+  }
+  if (nominator) shares.set(nominator, 1);
+  return shares;
+}
+
 // 1人分の給与計算方法2の歩合。指名客＝customers.primary_staff_idがこの人の顧客。
 // 金額はすべて税・テーブルチャージ抜きの小計（伝票の割引は割合で反映）。会計済みの伝票だけを数える
 export function snackPayBreakdown(
@@ -988,7 +1015,9 @@ export function snackPayBreakdown(
     const keepRatio =
       preDiscount > 0 ? (preDiscount - tabDiscountAmount(t.tab_items, taxRate, t.discount_percent, t.discount_amount)) / preDiscount : 1;
     const nominator = t.customer_id ? primaryOf.get(t.customer_id) ?? null : null;
-    const isMine = nominator === staffId;
+    // 分割払いで支払った人ごとに担当が違えば、その金額の比率で指名売上を分ける
+    const shares = tabSalesShares(t, nominator);
+    const myShare = shares.get(staffId) ?? 0;
 
     t.tab_items.forEach((i) => {
       const amount = itemSubtotal(i) * keepRatio;
@@ -998,22 +1027,26 @@ export function snackPayBreakdown(
       if (kind === "nomination") {
         // 指名料：品目の担当（無ければ指名の子）に全額
         if (settings.nominationFullBack && (i.staff_id ?? nominator ?? t.staff_id) === staffId) nominationBack += amount;
-        if (isMine && settings.includeNominationInSales) nominatedSales += amount;
+        if (settings.includeNominationInSales) nominatedSales += amount * myShare;
         return;
       }
 
       if (kind === "bottle") {
-        const toOther = i.staff_id != null && i.staff_id !== nominator;
-        // 指名客以外（店口座・他の子の指名客）が、この子に下ろしたボトル
-        if (settings.bottleBackEnabled && toOther && i.staff_id === staffId) bottleBack += amount * settings.bottleBackRate;
-        if (isMine && (!toOther || settings.includeBottleToOthersInSales)) {
-          nominatedSales += amount;
-          bottleCost += (menu?.cost_price ?? 0) * i.qty;
+        // その伝票の売上が入る子（指名の子、分割払いなら各支払いの担当）以外に下ろしたボトル
+        const toOther = i.staff_id != null && !shares.has(i.staff_id);
+        const backTarget =
+          settings.bottleBackCategories.length === 0 ||
+          settings.bottleBackCategories.includes(menu?.category ?? UNCATEGORIZED_LABEL);
+        if (settings.bottleBackEnabled && backTarget && toOther && i.staff_id === staffId)
+          bottleBack += amount * settings.bottleBackRate;
+        if (!toOther || settings.includeBottleToOthersInSales) {
+          nominatedSales += amount * myShare;
+          bottleCost += (menu?.cost_price ?? 0) * i.qty * myShare;
         }
         return;
       }
 
-      if (isMine) nominatedSales += amount;
+      nominatedSales += amount * myShare;
     });
   });
 
