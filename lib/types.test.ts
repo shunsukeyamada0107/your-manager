@@ -1020,8 +1020,8 @@ describe("snack mode pay", () => {
         tab_items: [
           item({ name: "SET", price: 13000, qty: 24 }), // 312,000
           item({ name: "ヴーヴ", price: 30000 }), // 30,000（原価8,000）
-          item({ name: "指名料", price: 3000 }), // 売上には含めず全額バック
-          item({ name: "同伴", price: 3000, qty: 2 }), // 6,000（売上から除いて同伴手当へ）
+          item({ name: "指名料", price: 3000 }), // 売上に入れて、付与した3,000を引く（全額バック）
+          item({ name: "同伴", price: 3000, qty: 2 }), // 6,000（売上に入る。引くのは付与した同伴料）
           item({ name: "ソフト", price: 2000, source: "manual" }), // 2,000
         ],
       }),
@@ -1032,10 +1032,11 @@ describe("snack mode pay", () => {
       // 未会計は数えない
       tab({ customer_id: "c-a", closed_at: null, tab_items: [item({ name: "SET", price: 13000 })] }),
     ];
-    const r = snackPayBreakdown(tabs, customers, menus, s, "a");
-    expect(r.nominatedSales).toBe(350000);
+    const r = snackPayBreakdown(tabs, customers, menus, s, "a", 6000); // 付与した同伴料2回分
+    expect(r.nominatedSales).toBe(353000); // 口座料も売上に入り、付与した分を引く
     expect(r.bottleCost).toBe(8000);
     expect(r.companionDeduction).toBe(6000);
+    expect(r.nominationDeduction).toBe(3000);
     expect(r.salesBackBase).toBe(336000);
     expect(r.salesBack).toBeCloseTo(10080);
     expect(r.bottleBack).toBeCloseTo(3000);
@@ -1044,10 +1045,10 @@ describe("snack mode pay", () => {
 
   it("a bottle a's customer gives to b: b gets 10%, a's sales include it only when the option is on", () => {
     const tabs = [tab({ customer_id: "c-a", tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "b" })] })];
-    expect(snackPayBreakdown(tabs, customers, menus, s, "b").bottleBack).toBeCloseTo(3000);
-    expect(snackPayBreakdown(tabs, customers, menus, s, "a").nominatedSales).toBe(30000);
+    expect(snackPayBreakdown(tabs, customers, menus, s, "b", 0).bottleBack).toBeCloseTo(3000);
+    expect(snackPayBreakdown(tabs, customers, menus, s, "a", 0).nominatedSales).toBe(30000);
     const off = { ...s, includeBottleToOthersInSales: false };
-    expect(snackPayBreakdown(tabs, customers, menus, off, "a").nominatedSales).toBe(0);
+    expect(snackPayBreakdown(tabs, customers, menus, off, "a", 0).nominatedSales).toBe(0);
   });
 
   it("counts companions from the 同伴 menu item (falling back to the companion button) without double counting", () => {
@@ -1087,10 +1088,10 @@ describe("snack mode pay", () => {
       tab({ customer_id: "c-a", tab_items: [item({ name: "吉四六", price: 13000 })] }),
     ];
     const only = { ...s, bottleBackCategories: ["ワイン", "シャンパン"] };
-    const r = snackPayBreakdown(tabs, customers, m, only, "a");
+    const r = snackPayBreakdown(tabs, customers, m, only, "a", 0);
     expect(r.bottleBack).toBeCloseTo(3500); // モエだけ10%
     expect(r.bottleCost).toBe(4000); // 自分の指名客の吉四六の原価は引く
-    expect(snackPayBreakdown(tabs, customers, m, s, "a").bottleBack).toBeCloseTo(4800); // 空=全ボトル
+    expect(snackPayBreakdown(tabs, customers, m, s, "a", 0).bottleBack).toBeCloseTo(4800); // 空=全ボトル
   });
 
   it("split payment: each payer's 担当 gets their share of the tab's sales", () => {
@@ -1110,14 +1111,14 @@ describe("snack mode pay", () => {
         tab_payments: [pay(70000, "a"), pay(30000, "b")],
       }),
     ];
-    const a = snackPayBreakdown(tabs, customers, menus, s, "a");
-    const b = snackPayBreakdown(tabs, customers, menus, s, "b");
+    const a = snackPayBreakdown(tabs, customers, menus, s, "a", 0);
+    const b = snackPayBreakdown(tabs, customers, menus, s, "b", 0);
     expect(a.nominatedSales).toBeCloseTo(95000 * 0.7);
     expect(b.nominatedSales).toBeCloseTo(95000 * 0.3);
     expect(a.bottleCost + b.bottleCost).toBeCloseTo(8000);
     // 担当が空の支払いは指名の子の分
     const t2 = [{ ...tabs[0], tab_payments: [pay(70000, null), pay(30000, "b")] }];
-    expect(snackPayBreakdown(t2, customers, menus, s, "a").nominatedSales).toBeCloseTo(95000 * 0.7);
+    expect(snackPayBreakdown(t2, customers, menus, s, "a", 0).nominatedSales).toBeCloseTo(95000 * 0.7);
   });
 
   it("can count sales as the billed amount including tax/TC (bottle back stays pre-tax)", () => {
@@ -1125,10 +1126,11 @@ describe("snack mode pay", () => {
       tab({ customer_id: "c-a", tab_items: [item({ name: "SET", price: 13000 }), item({ name: "指名料", price: 3000 })] }),
       tab({ customer_id: "c-shop", tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "a" })] }),
     ];
-    const r = snackPayBreakdown(tabs, customers, menus, { ...s, salesIncludeTax: true }, "a", 0.2);
-    expect(r.nominatedSales).toBeCloseTo(15600); // 13,000 × 1.2（指名料は含めない）
+    const r = snackPayBreakdown(tabs, customers, menus, { ...s, salesIncludeTax: true }, "a", 0, 0.2);
+    expect(r.nominatedSales).toBeCloseTo(19200); // (13,000 + 口座料3,000) × 1.2
+    expect(r.salesBackBase).toBeCloseTo(16200); // 付与した口座料3,000だけ引く（20%分の600は残る）
     expect(r.bottleBack).toBeCloseTo(3000); // 30,000 × 10%
-    expect(snackPayBreakdown(tabs, customers, menus, s, "a", 0.2).nominatedSales).toBeCloseTo(13000);
+    expect(snackPayBreakdown(tabs, customers, menus, s, "a", 0, 0.2).nominatedSales).toBeCloseTo(16000);
   });
 
   it("nomination fee back is the full item price even when the tab has a discount", () => {
@@ -1139,7 +1141,7 @@ describe("snack mode pay", () => {
         tab_items: [item({ name: "SET", price: 13000 }), item({ name: "指名料", price: 3000 })],
       }),
     ];
-    expect(snackPayBreakdown(tabs, customers, menus, s, "a").nominationBack).toBe(3000);
+    expect(snackPayBreakdown(tabs, customers, menus, s, "a", 0).nominationBack).toBe(3000);
   });
 
   it("deducts the business card fee first, then 10% of the rest", () => {

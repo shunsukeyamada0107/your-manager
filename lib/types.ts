@@ -909,7 +909,7 @@ export type SnackPaySettings = {
   salesIncludeTax: boolean; // 売上バックの元の売上を、消費税・テーブルチャージ込み（お会計の金額）で数える。false=税・TC抜きの小計
   deductBottleCost: boolean; // 売上バックの元から酒代（ボトルの原価）を引く
   deductCompanion: boolean; // 売上バックの元から同伴代（その期間の同伴手当の合計）を引く
-  includeNominationInSales: boolean; // 指名料を売上バックの元の売上に含める
+  deductNomination: boolean; // その子に付与した口座料（指名料）を、売上バックの元から最後に引く（同伴料と同じ扱い）
   includeBottleToOthersInSales: boolean; // 指名客が他の子に下ろしたボトルも、指名の子の売上に含める
   bottleBackEnabled: boolean; // 自分の指名客以外からボトルを下ろしてもらった時のバック
   bottleBackRate: number; // そのバック率（例: 0.10。販売価格に掛ける、原価は引かない）
@@ -927,7 +927,7 @@ export const DEFAULT_SNACK_PAY_SETTINGS: SnackPaySettings = {
   salesIncludeTax: false,
   deductBottleCost: true,
   deductCompanion: true,
-  includeNominationInSales: false,
+  deductNomination: true,
   includeBottleToOthersInSales: true,
   bottleBackEnabled: true,
   bottleBackRate: 0.1,
@@ -963,12 +963,13 @@ export function snackSalesBackRate(amount: number, stepAmount: number, stepRate:
 export type SnackPayBreakdown = {
   nominatedSales: number; // 指名客の売上（割引反映後。salesIncludeTaxなら税・テーブルチャージ込み、それ以外は抜き）
   bottleCost: number; // 引いた酒代
-  companionDeduction: number; // 売上から除いた同伴料（伝票の同伴料の品目。同伴手当として別にその子へ渡す）
+  companionDeduction: number; // 引いた同伴料（この子に付与した同伴手当の合計）
   salesBackBase: number; // 売上バックの元（上の差し引き後）
   salesBackRate: number;
   salesBack: number;
   bottleBack: number; // 指名客以外から下ろしてもらったボトルのバック
-  nominationBack: number; // 指名料の全額バック
+  nominationBack: number; // 口座料（指名料）の全額バック
+  nominationDeduction: number; // 売上バックの元から引いた口座料（この子に付与した分）
 };
 
 // 伝票の品目が、メニュー上でボトル/指名料のどれに当たるか・原価はいくらかを、品名（＋金額）でメニューから引く。
@@ -1011,6 +1012,7 @@ export function snackPayBreakdown(
   menuItems: MenuItem[],
   settings: SnackPaySettings,
   staffId: string,
+  companionAllowanceTotal: number, // この子に付与した同伴料の合計（設定により売上バックの元から引く）
   taxRate: number = DEFAULT_TAX_RATE
 ): SnackPayBreakdown {
   const primaryOf = new Map(customers.map((c) => [c.id, c.primary_staff_id]));
@@ -1019,7 +1021,6 @@ export function snackPayBreakdown(
   let bottleCost = 0;
   let bottleBack = 0;
   let nominationBack = 0;
-  let companionDeduction = 0;
 
   tabs.forEach((t) => {
     if (!t.closed_at) return;
@@ -1042,14 +1043,8 @@ export function snackPayBreakdown(
         // 指名料：品目の担当（無ければ指名の子）に、値引きに関係なく品目の金額をそのまま全額
         if (settings.nominationFullBack && (i.staff_id ?? nominator ?? t.staff_id) === staffId)
           nominationBack += itemSubtotal(i);
-        if (settings.includeNominationInSales) nominatedSales += salesAmount * myShare;
-        return;
-      }
-
-      if (kind === "companion") {
-        // 同伴料：同伴手当としてその子に渡すので、設定により売上バックの元から除く（お会計に乗った金額のまま）
+        // 口座料もお会計の一部として売上に入れ、この子に付与した分を最後に引く（同伴料と同じ扱い）
         nominatedSales += salesAmount * myShare;
-        if (settings.deductCompanion) companionDeduction += salesAmount * myShare;
         return;
       }
 
@@ -1073,7 +1068,10 @@ export function snackPayBreakdown(
   });
 
   const deductedCost = settings.deductBottleCost ? bottleCost : 0;
-  const salesBackBase = Math.max(0, nominatedSales - deductedCost - companionDeduction);
+  // 同伴料は、伝票に入った額ではなく、この子に実際に付与した分だけを最後に引く
+  const companionDeduction = settings.deductCompanion ? companionAllowanceTotal : 0;
+  const nominationDeduction = settings.deductNomination ? nominationBack : 0;
+  const salesBackBase = Math.max(0, nominatedSales - deductedCost - companionDeduction - nominationDeduction);
   const salesBackRate = settings.salesBackEnabled
     ? snackSalesBackRate(salesBackBase, settings.stepAmount, settings.stepRate)
     : 0;
@@ -1086,6 +1084,7 @@ export function snackPayBreakdown(
     salesBack: salesBackBase * salesBackRate,
     bottleBack,
     nominationBack,
+    nominationDeduction,
   };
 }
 

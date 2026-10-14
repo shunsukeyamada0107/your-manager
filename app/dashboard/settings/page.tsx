@@ -53,8 +53,8 @@ const PAY_METHODS = [
   { id: 1, label: "通常", note: "担当した伝票の売上 × 歩合率（スタッフごとの指名歩合・スライド歩合もここ）" },
   {
     id: 2,
-    label: "指名売上の段階バック",
-    note: "指名のお客様の売上に段階率＋ボトルバック・指名料・同伴、名刺代と控除を差し引き",
+    label: "口座売上の段階バック",
+    note: "口座（担当）のお客様の売上に段階率＋ボトルバック・口座料・同伴、名刺代と控除を差し引き",
   },
 ];
 
@@ -832,6 +832,7 @@ export default function SettingsPage() {
           menu,
           snackSettings,
           payslipStaffId,
+          companionAllowance,
           taxRate
         )
       : null;
@@ -1086,7 +1087,7 @@ export default function SettingsPage() {
         </div>
         {d.method === 2 && (
         <div className="space-y-2 pt-1">
-          {check("salesBackEnabled", "キャスト売上バック（指名のお客様の売上に段階率）")}
+          {check("salesBackEnabled", "キャスト売上バック（口座のお客様の売上に段階率）", "口座＝顧客情報の担当キャスト。担当が休みの日の来店もその子の売上です")}
           {d.salesBackEnabled && (
             <div className="pl-6 space-y-2">
               <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
@@ -1099,9 +1100,9 @@ export default function SettingsPage() {
                 "外すと、税・テーブルチャージ抜きの小計で数えます"
               )}
               {check("deductBottleCost", "酒代（ボトルの原価）を引く", "原価はメニュー管理でボトルごとに入力します")}
-              {check("deductCompanion", "同伴料を売上から除く（同伴料は全額その子の同伴手当になります）")}
-              {check("includeNominationInSales", "指名料も売上に含める")}
-              {check("includeBottleToOthersInSales", "指名のお客様が他の子に下ろしたボトルも、指名の子の売上に含める")}
+              {check("deductCompanion", "その子に付与した同伴料を引く")}
+              {check("deductNomination", "その子に付与した口座料（指名料）を引く")}
+              {check("includeBottleToOthersInSales", "口座のお客様が他の子に下ろしたボトルも、口座の子の売上に含める")}
               <div className="text-xs text-gray-500">
                 率は差し引いた後の金額で決まり、その金額全体に掛けます（例：33.6万円 → 3%）。
               </div>
@@ -1140,7 +1141,7 @@ export default function SettingsPage() {
               )}
             </div>
           )}
-          {check("nominationFullBack", "指名料を全額その子のバックにする")}
+          {check("nominationFullBack", "口座料（指名料）を全額その子のバックにする")}
           <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
             名刺代（毎月）{num(d.businessCardFee, (v) => set({ businessCardFee: v }), "円")}
           </div>
@@ -1151,7 +1152,7 @@ export default function SettingsPage() {
         )}
         {d.method === 2 && (
         <div className="text-xs text-gray-500">
-          ボトル・指名料・同伴として扱う商品は、メニュー管理の品目ごとの選択欄で選びます。同伴はメニューで入れるだけで、その品目の担当（未指定なら指名の子）の同伴回数になります。どの子に下ろしたボトルかは、伝票の品目の担当で記録します。保存は下の「保存する」ボタンで行います。
+          ボトル・口座料（指名料）・同伴として扱う商品は、メニュー管理の品目ごとの選択欄で選びます。同伴はメニューで入れるだけで、その品目の担当（未指定なら口座の子）の同伴回数になります。どの子に下ろしたボトルかは、伝票の品目の担当で記録します。保存は下の「保存する」ボタンで行います。
         </div>
         )}
       </div>
@@ -2028,7 +2029,7 @@ export default function SettingsPage() {
                   >
                     <option value="">通常</option>
                     <option value="bottle">ボトル・抜き物</option>
-                    <option value="nomination">指名料</option>
+                    <option value="nomination">口座料（指名料）</option>
                     <option value="companion">同伴</option>
                   </select>
                   {m.snack_item_kind === "bottle" && (
@@ -2688,9 +2689,10 @@ export default function SettingsPage() {
                     <>
                       <tr className="border-b border-gray-100 text-gray-500 text-xs">
                         <td className="py-1.5">
-                          指名売上 ¥{Math.round(payslipData.snack.nominatedSales).toLocaleString()} − 酒代 ¥
-                          {Math.round(payslipData.snack.bottleCost).toLocaleString()} − 同伴代 ¥
-                          {Math.round(payslipData.snack.companionDeduction).toLocaleString()}
+                          口座売上 ¥{Math.round(payslipData.snack.nominatedSales).toLocaleString()} − 酒代 ¥
+                          {Math.round(payslipData.snack.bottleCost).toLocaleString()} − 同伴料 ¥
+                          {Math.round(payslipData.snack.companionDeduction).toLocaleString()} − 口座料 ¥
+                          {Math.round(payslipData.snack.nominationDeduction).toLocaleString()}
                         </td>
                         <td className="py-1.5 text-right font-mono">
                           ¥{Math.round(payslipData.snack.salesBackBase).toLocaleString()}
@@ -2714,7 +2716,7 @@ export default function SettingsPage() {
                       )}
                       {payslipData.snack.nominationBack !== 0 && (
                         <tr className="border-b border-gray-200">
-                          <td className="py-2.5">指名料バック</td>
+                          <td className="py-2.5">口座料バック</td>
                           <td className="py-2.5 text-right font-mono">
                             ¥{Math.round(payslipData.snack.nominationBack).toLocaleString()}
                           </td>
