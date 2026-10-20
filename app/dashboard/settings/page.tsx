@@ -44,6 +44,15 @@ import {
   snackDeductions,
   snackCompanionCount,
   dailyPayByStaff,
+  tabCompanionIds,
+  attendanceDetailRows,
+  companionDetailRows,
+  namedCustomerDetailRows,
+  primaryCustomerDetailRows,
+  AttendanceDetailRow,
+  CompanionDetailRow,
+  NamedCommissionDetailRow,
+  PrimaryCustomerDetailRow,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
 import { StoreTheme } from "@/lib/theme";
@@ -238,6 +247,14 @@ export default function SettingsPage() {
     // 給与計算方法2のみ：売上バックの内訳と、名刺代・控除後の差引支給額
     snack: (ReturnType<typeof snackPayBreakdown> & ReturnType<typeof snackDeductions>) | null;
     dailyPaid: number; // 経費タブの出勤情報で記録した、期間中の日払い済み合計
+    // 手計算・日報との突き合わせ用の内訳（明細書そのものには載せず、画面で確認する）
+    detail: {
+      attendance: AttendanceDetailRow[];
+      companions: CompanionDetailRow[];
+      companionUnit: number; // 同伴1回あたりの金額
+      named: NamedCommissionDetailRow[];
+      primaryCustomer: PrimaryCustomerDetailRow[];
+    };
   } | null>(null);
 
   const [storeNameDraft, setStoreNameDraft] = useState(storeName ?? "");
@@ -846,6 +863,31 @@ export default function SettingsPage() {
       hourlyCost +
       (snackPay ? snackPay.salesBack + snackPay.bottleBack + snackPay.nominationBack : 0);
 
+    const tabList = (tabsData as TabWithItems[]) ?? [];
+    const customerList = (customersData as Customer[]) ?? [];
+    const companionUnit = isTieredPayMethod
+      ? s.companion_allowance_amount ?? menu.find((m) => m.snack_item_kind === "companion")?.price ?? 0
+      : s.companion_allowance_amount ?? 0;
+    const detail = {
+      attendance: attendanceDetailRows((attData as Attendance[]) ?? []),
+      companions:
+        storeMode === "club"
+          ? companionDetailRows(tabList, (t) =>
+              isTieredPayMethod
+                ? snackCompanionCount([t], customerList, menu, payslipStaffId)
+                : tabCompanionIds(t).includes(payslipStaffId)
+                  ? 1
+                  : 0
+            )
+          : [],
+      companionUnit,
+      named: namedCustomerDetailRows(tabList, namedRules, payslipStaffId, workedSet, taxRate, roundUnit),
+      primaryCustomer:
+        s.commission_mode !== "standard"
+          ? primaryCustomerDetailRows(tabList, ownerOf, payslipStaffId, workedSet, taxRate, roundUnit)
+          : [],
+    };
+
     setPayslipData({
       staffName: s.name,
       monthLabel: label,
@@ -861,6 +903,7 @@ export default function SettingsPage() {
       total: gross,
       dailyPaid: dailyPayByStaff((attData as Attendance[]) ?? []).get(payslipStaffId) ?? 0,
       snack: snackPay ? { ...snackPay, ...snackDeductions(gross, snackSettings) } : null,
+      detail,
     });
     setGeneratingPayslip(false);
     setShowPayslipPicker(false);
@@ -1499,6 +1542,170 @@ export default function SettingsPage() {
               保存
             </button>
           </div>
+        )}
+      </div>
+    );
+  }
+
+  // 給与明細の内訳（手計算・日報との突き合わせ用）。明細書のPDF・印刷には含めず、画面で確認する
+  function renderPayslipDetail(d: NonNullable<typeof payslipData>) {
+    const yen = (n: number) => `¥${Math.round(n).toLocaleString()}`;
+    const md = (date: string) => {
+      const dt = new Date(`${date}T12:00:00`);
+      return `${dt.getMonth() + 1}/${dt.getDate()}(${["日", "月", "火", "水", "木", "金", "土"][dt.getDay()]})`;
+    };
+    const hm = (iso: string) =>
+      new Date(iso).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", hour12: false });
+    const det = d.detail;
+    const attHoursTotal = det.attendance.reduce((a, r) => a + r.hours, 0);
+    const attCostTotal = det.attendance.reduce((a, r) => a + r.cost, 0);
+    const companionCountTotal = det.companions.reduce((a, r) => a + r.count, 0);
+    const namedTotal = det.named.reduce((a, r) => a + r.commission, 0);
+    const primaryTotal = det.primaryCustomer.reduce((a, r) => a + r.amount, 0);
+    const snackTabs = d.snack?.tabs ?? [];
+    const summaryClass = "cursor-pointer select-none py-2 text-sm font-bold text-gray-200";
+    const cellL = "py-1.5 text-gray-300";
+    const cellR = "py-1.5 text-right font-mono text-gray-300";
+    return (
+      <div className="max-w-lg mx-auto mt-4 rounded-xl border border-line bg-elevated p-4 space-y-1 print:hidden">
+        <div className="text-sm font-bold text-gold">明細の内訳（手計算・日報との突き合わせ用）</div>
+        <div className="text-xs text-gray-500 pb-1">この画面でのみ表示します。PDF・印刷の明細書には載りません。</div>
+
+        <details className="border-t border-line">
+          <summary className={summaryClass}>
+            出勤・退勤（{det.attendance.length}日・{attHoursTotal.toFixed(1)}時間・{yen(attCostTotal)}）
+          </summary>
+          {det.attendance.length === 0 ? (
+            <div className="text-xs text-gray-500 pb-2">この期間の出退勤の記録はありません</div>
+          ) : (
+            <table className="w-full text-xs mb-2">
+              <thead>
+                <tr className="text-gray-500 text-left">
+                  <th className="py-1 font-normal">日</th>
+                  <th className="py-1 font-normal">出勤〜退勤</th>
+                  <th className="py-1 font-normal text-right">時間</th>
+                  <th className="py-1 font-normal text-right">金額</th>
+                </tr>
+              </thead>
+              <tbody>
+                {det.attendance.map((r, i) => (
+                  <tr key={i} className="border-t border-line">
+                    <td className={cellL}>{md(r.date)}</td>
+                    <td className={cellL}>
+                      {hm(r.clockIn)}〜{r.clockOut ? hm(r.clockOut) : "未入力"}
+                    </td>
+                    <td className={cellR}>{r.hours.toFixed(1)}h</td>
+                    <td className={cellR}>
+                      {r.wage == null ? "時給未設定" : yen(r.cost)}
+                      {r.dailyPay > 0 && <div className="text-gold">日払い {yen(r.dailyPay)}</div>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </details>
+
+        {storeMode === "club" && (
+          <details className="border-t border-line">
+            <summary className={summaryClass}>
+              同伴の明細（{companionCountTotal % 1 === 0 ? companionCountTotal : companionCountTotal.toFixed(1)}回・
+              {yen(d.companionAllowance)}）
+            </summary>
+            {det.companions.length === 0 ? (
+              <div className="text-xs text-gray-500 pb-2">この期間に同伴した伝票はありません</div>
+            ) : (
+              <table className="w-full text-xs mb-2">
+                <tbody>
+                  {det.companions.map((r) => (
+                    <tr key={r.tabId} className="border-t border-line">
+                      <td className={cellL}>{md(r.businessDate)}</td>
+                      <td className={cellL}>{r.name}</td>
+                      <td className={cellR}>
+                        {r.count % 1 === 0 ? r.count : r.count.toFixed(1)}回 {yen(r.count * det.companionUnit)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </details>
+        )}
+
+        {d.snack && (
+          <details className="border-t border-line">
+            <summary className={summaryClass}>
+              口座売上・バックの明細（{snackTabs.length}件・口座売上 {yen(d.snack.nominatedSales)}）
+            </summary>
+            {snackTabs.length === 0 ? (
+              <div className="text-xs text-gray-500 pb-2">この期間に口座売上・バックになった伝票はありません</div>
+            ) : (
+              <table className="w-full text-xs mb-2">
+                <tbody>
+                  {snackTabs.map((r) => (
+                    <tr key={r.tabId} className="border-t border-line">
+                      <td className={cellL}>{md(r.businessDate)}</td>
+                      <td className={cellL}>{r.name}</td>
+                      <td className={cellR}>
+                        {yen(r.sales)}
+                        {r.bottleBack > 0 && <div className="text-gold">ボトルバック {yen(r.bottleBack)}</div>}
+                        {r.nominationBack > 0 && <div className="text-gold">口座料 {yen(r.nominationBack)}</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </details>
+        )}
+
+        {det.primaryCustomer.length > 0 && (
+          <details className="border-t border-line">
+            <summary className={summaryClass}>
+              担当客の売上の明細（{det.primaryCustomer.length}件・{yen(primaryTotal)}）
+            </summary>
+            <table className="w-full text-xs mb-2">
+              <tbody>
+                {det.primaryCustomer.map((r) => (
+                  <tr key={r.tabId} className="border-t border-line">
+                    <td className={cellL}>{md(r.businessDate)}</td>
+                    <td className={cellL}>
+                      {r.name}
+                      <span className="text-gray-500">（{r.worked ? "出勤日" : "休みの日"}）</span>
+                    </td>
+                    <td className={cellR}>{yen(r.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+        )}
+
+        {det.named.length > 0 && (
+          <details className="border-t border-line">
+            <summary className={summaryClass}>
+              指名歩合の明細（{det.named.length}件・{yen(namedTotal)}）
+            </summary>
+            <table className="w-full text-xs mb-2">
+              <tbody>
+                {det.named.map((r, i) => (
+                  <tr key={`${r.tabId}-${i}`} className="border-t border-line">
+                    <td className={cellL}>{md(r.businessDate)}</td>
+                    <td className={cellL}>
+                      {r.name}
+                      <span className="text-gray-500">
+                        （{r.worked ? "出勤日" : "休みの日"} {Math.round(r.rate * 1000) / 10}%）
+                      </span>
+                    </td>
+                    <td className={cellR}>
+                      {yen(r.commission)}
+                      <div className="text-gray-500">会計 {yen(r.amount)}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
         )}
       </div>
     );
@@ -2811,6 +3018,7 @@ export default function SettingsPage() {
                 {new Date().toLocaleDateString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit" })}
               </div>
             </div>
+            {renderPayslipDetail(payslipData)}
           </div>
         </>
       )}

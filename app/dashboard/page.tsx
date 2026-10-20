@@ -361,7 +361,7 @@ function POSPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modalName, showCreateModal, storeId, enableNameSearch, storeMode]);
 
-  // クラブモード：伝票作成モーダルで顧客名・フリガナをあいまい検索する（デバウンス付き）
+  // クラブモード：伝票作成モーダルで顧客名・フリガナ（前方一致）と、メモ・ボトルキープ（部分一致）をあいまい検索する（デバウンス付き）
   useEffect(() => {
     if (storeMode !== "club" || !showCreateModal || !storeId || selectedCustomer || !modalName.trim()) {
       setCustomerSearchResults([]);
@@ -372,8 +372,9 @@ function POSPageInner() {
     setSearchingCustomer(true);
     const t = setTimeout(async () => {
       // .or()でのPostgREST文字列組み立ては特殊文字のエスケープが必要で壊れやすいため、
-      // 名前検索とフリガナ検索を2本の独立クエリにしてクライアント側でID重複を除いてマージする
-      const [byName, byKana] = await Promise.all([
+      // 検索を独立クエリに分けてクライアント側でID重複を除いてマージする（名前・フリガナの一致を先に並べる）
+      const likeEscaped = query.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+      const [byName, byKana, byMemo, byBottle] = await Promise.all([
         supabase
           .from("customers")
           .select("*")
@@ -390,10 +391,28 @@ function POSPageInner() {
           .ilike("name_kana", `${query}%`)
           .order("created_at", { ascending: false })
           .limit(5),
+        supabase
+          .from("customers")
+          .select("*")
+          .eq("store_id", storeId)
+          .eq("active", true)
+          .ilike("memo", `%${likeEscaped}%`)
+          .order("created_at", { ascending: false })
+          .limit(5),
+        supabase
+          .from("customers")
+          .select("*")
+          .eq("store_id", storeId)
+          .eq("active", true)
+          .ilike("bottle_keep", `%${likeEscaped}%`)
+          .order("created_at", { ascending: false })
+          .limit(5),
       ]);
       const merged = new Map<string, Customer>();
-      [...(byName.data ?? []), ...(byKana.data ?? [])].forEach((c) => merged.set(c.id, c as Customer));
-      setCustomerSearchResults(Array.from(merged.values()).slice(0, 5));
+      [...(byName.data ?? []), ...(byKana.data ?? []), ...(byMemo.data ?? []), ...(byBottle.data ?? [])].forEach((c) => {
+        if (!merged.has(c.id)) merged.set(c.id, c as Customer);
+      });
+      setCustomerSearchResults(Array.from(merged.values()).slice(0, 8));
       setSearchingCustomer(false);
     }, 300);
     return () => clearTimeout(t);
@@ -2348,7 +2367,7 @@ function POSPageInner() {
                     setModalName(e.target.value);
                     setSelectedCustomer(null);
                   }}
-                  placeholder="名前・フリガナで検索"
+                  placeholder="名前・フリガナ・メモ・ボトルで検索"
                   className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
                 />
 
@@ -2371,6 +2390,16 @@ function POSPageInner() {
                         >
                           <div className="text-sm font-bold text-gray-200">{c.name}</div>
                           {c.name_kana && <div className="text-xs text-gray-500">{c.name_kana}</div>}
+                          {(() => {
+                            // 名前・フリガナ以外（メモ・ボトル）で見つかった場合は、何に一致したかを出して見分けられるようにする
+                            const q = modalName.trim().toLowerCase();
+                            if (!q) return null;
+                            if (c.memo?.toLowerCase().includes(q))
+                              return <div className="text-xs text-gold mt-0.5 truncate">📝 {c.memo}</div>;
+                            if (c.bottle_keep?.toLowerCase().includes(q))
+                              return <div className="text-xs text-gold mt-0.5 truncate">🍾 {c.bottle_keep}</div>;
+                            return null;
+                          })()}
                         </button>
                       ))}
                       <button

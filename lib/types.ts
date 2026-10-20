@@ -970,6 +970,17 @@ export type SnackPayBreakdown = {
   bottleBack: number; // 指名客以外から下ろしてもらったボトルのバック
   nominationBack: number; // 口座料（指名料）の全額バック
   nominationDeduction: number; // 売上バックの元から引いた口座料（この子に付与した分）
+  tabs: SnackPayTabRow[]; // 上の売上・バックの伝票ごとの内訳（給与明細の突き合わせ用）
+};
+
+// 給与計算方法2で、この子の売上・バックに入った伝票1枚ごとの内訳
+export type SnackPayTabRow = {
+  tabId: string;
+  businessDate: string;
+  name: string; // 伝票名（お客様名）
+  sales: number; // この伝票から指名売上に入った額（settingsの数え方どおり）
+  bottleBack: number; // この伝票から入ったボトルバック
+  nominationBack: number; // この伝票から入った口座料（指名料）バック
 };
 
 // 伝票の品目が、メニュー上でボトル/指名料のどれに当たるか・原価はいくらかを、品名（＋金額）でメニューから引く。
@@ -1021,9 +1032,13 @@ export function snackPayBreakdown(
   let bottleCost = 0;
   let bottleBack = 0;
   let nominationBack = 0;
+  const tabRows: SnackPayTabRow[] = [];
 
   tabs.forEach((t) => {
     if (!t.closed_at) return;
+    const salesBefore = nominatedSales;
+    const bottleBackBefore = bottleBack;
+    const nominationBackBefore = nominationBack;
     const preDiscount = tabPreDiscountTotal(t.tab_items, taxRate);
     const keepRatio =
       preDiscount > 0 ? (preDiscount - tabDiscountAmount(t.tab_items, taxRate, t.discount_percent, t.discount_amount)) / preDiscount : 1;
@@ -1065,6 +1080,16 @@ export function snackPayBreakdown(
 
       nominatedSales += salesAmount * myShare;
     });
+
+    const row: SnackPayTabRow = {
+      tabId: t.id,
+      businessDate: t.business_date,
+      name: t.name,
+      sales: nominatedSales - salesBefore,
+      bottleBack: bottleBack - bottleBackBefore,
+      nominationBack: nominationBack - nominationBackBefore,
+    };
+    if (row.sales !== 0 || row.bottleBack !== 0 || row.nominationBack !== 0) tabRows.push(row);
   });
 
   const deductedCost = settings.deductBottleCost ? bottleCost : 0;
@@ -1085,6 +1110,7 @@ export function snackPayBreakdown(
     bottleBack,
     nominationBack,
     nominationDeduction,
+    tabs: tabRows.sort((a, b) => a.businessDate.localeCompare(b.businessDate)),
   };
 }
 
@@ -1121,6 +1147,113 @@ export function snackCompanionCount(
     });
   });
   return count;
+}
+
+// ---- 給与明細の内訳（手計算・日報との突き合わせ用）。金額の計算そのものは上の関数が正で、ここは「何が入っているか」の一覧だけ作る ----
+
+export type AttendanceDetailRow = {
+  date: string; // 営業日
+  clockIn: string;
+  clockOut: string | null; // nullは退勤未入力
+  hours: number;
+  wage: number | null; // その日の時給（出退勤登録時点のもの）。nullは時給未設定
+  cost: number; // 時給×時間（時給未設定は0）。人件費の計算と同じ
+  dailyPay: number; // その日に日払いで渡した額
+};
+
+// 出退勤の記録を、営業日・出勤時刻の順に1行ずつの明細にする
+export function attendanceDetailRows(attendance: Attendance[], nowMs = Date.now()): AttendanceDetailRow[] {
+  return [...attendance]
+    .sort((a, b) => a.business_date.localeCompare(b.business_date) || a.clock_in.localeCompare(b.clock_in))
+    .map((a) => {
+      const hours = attHours(a, nowMs);
+      return {
+        date: a.business_date,
+        clockIn: a.clock_in,
+        clockOut: a.clock_out,
+        hours,
+        wage: a.wage_snapshot,
+        cost: a.wage_snapshot != null ? hours * a.wage_snapshot : 0,
+        dailyPay: a.daily_pay ?? 0,
+      };
+    });
+}
+
+export type CompanionDetailRow = { tabId: string; businessDate: string; name: string; count: number };
+
+// 同伴手当の元になった伝票の一覧。countForが回数を返す伝票（会計済み・1回以上）だけを営業日順に並べる。
+// 回数は給与明細の同伴手当と同じ数え方を呼び出し側が渡す（通常=同伴ボタン、方法2=同伴料の品目も含む）
+export function companionDetailRows(
+  tabs: TabWithItems[],
+  countFor: (t: TabWithItems) => number
+): CompanionDetailRow[] {
+  return tabs
+    .filter((t) => t.closed_at)
+    .map((t) => ({ tabId: t.id, businessDate: t.business_date, name: t.name, count: countFor(t) }))
+    .filter((r) => r.count > 0)
+    .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
+}
+
+export type NamedCommissionDetailRow = {
+  tabId: string;
+  businessDate: string;
+  name: string;
+  amount: number; // お会計金額
+  rate: number; // 適用した率（本人が出勤した日はrate、休みの日はday_off_rate）
+  worked: boolean;
+  commission: number;
+};
+
+// 指名歩合（顧客ごとのルール）の元になった伝票の一覧。namedCustomerCommissionと同じ計算を伝票ごとに分けたもの
+export function namedCustomerDetailRows(
+  tabs: TabWithItems[],
+  rules: CustomerStaffCommissionRule[],
+  staffId: string,
+  workedSet: Set<string>,
+  taxRate: number = DEFAULT_TAX_RATE,
+  roundUnit: number = DEFAULT_ROUND_UNIT
+): NamedCommissionDetailRow[] {
+  const mine = rules.filter((r) => r.staff_id === staffId);
+  const rows: NamedCommissionDetailRow[] = [];
+  tabs.forEach((t) => {
+    if (!t.closed_at || !t.customer_id) return;
+    const amount = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
+    mine
+      .filter((r) => r.customer_id === t.customer_id)
+      .forEach((rule) => {
+        const worked = didWorkOn(workedSet, staffId, t.business_date);
+        const rate = worked ? rule.rate : rule.day_off_rate;
+        rows.push({ tabId: t.id, businessDate: t.business_date, name: t.name, amount, rate, worked, commission: amount * rate });
+      });
+  });
+  return rows.sort((a, b) => a.businessDate.localeCompare(b.businessDate));
+}
+
+export type PrimaryCustomerDetailRow = { tabId: string; businessDate: string; name: string; amount: number; worked: boolean };
+
+// 担当客の固定/スライド歩合（commission_mode）の元になった伝票の一覧。primaryCustomerSalesBreakdownと同じ対象・同じ金額で、
+// 本人がその営業日に出勤していたか（worked）も付ける
+export function primaryCustomerDetailRows(
+  tabs: TabWithItems[],
+  ownerOf: (customerId: string | null) => string | null,
+  staffId: string,
+  workedSet: Set<string>,
+  taxRate: number = DEFAULT_TAX_RATE,
+  roundUnit: number = DEFAULT_ROUND_UNIT
+): PrimaryCustomerDetailRow[] {
+  const rows: PrimaryCustomerDetailRow[] = [];
+  tabs.forEach((t) => {
+    if (!t.closed_at || !t.customer_id) return;
+    if (ownerOf(t.customer_id) !== staffId) return;
+    rows.push({
+      tabId: t.id,
+      businessDate: t.business_date,
+      name: t.name,
+      amount: tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit),
+      worked: didWorkOn(workedSet, staffId, t.business_date),
+    });
+  });
+  return rows.sort((a, b) => a.businessDate.localeCompare(b.businessDate));
 }
 
 // 支給合計から名刺代を引き、その残りに控除率を掛けた額を控除する

@@ -32,6 +32,10 @@ import {
   snackPayBreakdown,
   snackDeductions,
   snackCompanionCount,
+  attendanceDetailRows,
+  companionDetailRows,
+  namedCustomerDetailRows,
+  primaryCustomerDetailRows,
   dailyPayByStaff,
   tabCompanionIds,
   tabPaymentAllocation,
@@ -1043,6 +1047,31 @@ describe("snack mode pay", () => {
     expect(r.nominationBack).toBe(3000);
   });
 
+  it("lists the tabs behind the sales and bottle/nomination back, summing to the totals", () => {
+    const tabs = [
+      tab({
+        customer_id: "c-a",
+        business_date: "2026-07-03",
+        name: "Aの客",
+        tab_items: [item({ name: "SET", price: 13000 }), item({ name: "指名料", price: 3000 })],
+      }),
+      tab({
+        customer_id: "c-shop",
+        business_date: "2026-07-01",
+        name: "店のお客",
+        tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "a" })],
+      }),
+      tab({ customer_id: "c-b", tab_items: [item({ name: "SET", price: 13000 })] }), // bの客→aの明細に出ない
+    ];
+    const r = snackPayBreakdown(tabs, customers, menus, s, "a", 0);
+    expect(r.tabs.map((t) => t.name)).toEqual(["店のお客", "Aの客"]); // 営業日順
+    expect(r.tabs.reduce((a, t) => a + t.sales, 0)).toBeCloseTo(r.nominatedSales);
+    expect(r.tabs.reduce((a, t) => a + t.bottleBack, 0)).toBeCloseTo(r.bottleBack);
+    expect(r.tabs.reduce((a, t) => a + t.nominationBack, 0)).toBeCloseTo(r.nominationBack);
+    expect(r.tabs[0].bottleBack).toBeCloseTo(3000);
+    expect(r.tabs[1].nominationBack).toBe(3000);
+  });
+
   it("a bottle a's customer gives to b: b gets 10%, a's sales include it only when the option is on", () => {
     const tabs = [tab({ customer_id: "c-a", tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "b" })] })];
     expect(snackPayBreakdown(tabs, customers, menus, s, "b", 0).bottleBack).toBeCloseTo(3000);
@@ -1170,5 +1199,76 @@ describe("dailyPayByStaff", () => {
     ]);
     expect(m.get("a")).toBe(22500);
     expect(m.has("b")).toBe(false);
+  });
+});
+
+describe("payslip detail rows", () => {
+  it("attendanceDetailRows lists each shift in date order with hours, cost and daily pay", () => {
+    const rows = attendanceDetailRows(
+      [
+        { ...attendanceRow("a", "2026-07-02"), wage_snapshot: 3000, daily_pay: 5000 },
+        { ...attendanceRow("a", "2026-07-01"), wage_snapshot: 3000 }, // 19:00〜23:00 = 4h
+        { ...attendanceRow("a", "2026-07-03"), wage_snapshot: null },
+      ],
+      Date.now()
+    );
+    expect(rows.map((r) => r.date)).toEqual(["2026-07-01", "2026-07-02", "2026-07-03"]);
+    expect(rows[0].hours).toBeCloseTo(4);
+    expect(rows[0].cost).toBeCloseTo(12000);
+    expect(rows[1].dailyPay).toBe(5000);
+    expect(rows[2].wage).toBeNull();
+    expect(rows[2].cost).toBe(0);
+    // 給与明細の時給分（hourlyLaborBreakdown）と同じ合計になる（時給未設定の日は両方とも0）
+    const att = [attendanceRow("a", "2026-07-01"), attendanceRow("a", "2026-07-02")].map((a) => ({ ...a, wage_snapshot: 3000 }));
+    expect(attendanceDetailRows(att).reduce((x, r) => x + r.cost, 0)).toBeCloseTo(hourlyLaborBreakdown(att, () => "a")[0].cost);
+  });
+
+  it("companionDetailRows keeps only closed tabs with a positive count, in date order", () => {
+    const tabs = [
+      tab({ id: "t2", business_date: "2026-07-05", name: "Bさん", companion_staff_ids: ["a"] }),
+      tab({ id: "t1", business_date: "2026-07-02", name: "Aさん", companion_staff_ids: ["a", "b"] }),
+      tab({ id: "t3", business_date: "2026-07-03", name: "未会計", companion_staff_ids: ["a"], closed_at: null }),
+      tab({ id: "t4", business_date: "2026-07-04", name: "同伴なし" }),
+    ];
+    const rows = companionDetailRows(tabs, (t) => (tabCompanionIds(t).includes("a") ? 1 : 0));
+    expect(rows.map((r) => r.name)).toEqual(["Aさん", "Bさん"]);
+    expect(rows.reduce((a, r) => a + r.count, 0)).toBe(
+      companionAllowanceBreakdown(tabs, staffNameOf, () => 1).find((c) => c.staffId === "a")!.count
+    );
+  });
+
+  it("namedCustomerDetailRows sums to namedCustomerCommission and flags worked days", () => {
+    const tabs = [
+      tab({ customer_id: "c1", business_date: "2026-07-01", name: "ゆうくん", tab_items: [item({ price: 10000 })] }),
+      tab({ customer_id: "c1", business_date: "2026-07-02", name: "ゆうくん", tab_items: [item({ price: 20000 })] }),
+      tab({ customer_id: "c2", business_date: "2026-07-02", name: "別の客", tab_items: [item({ price: 9000 })] }),
+    ];
+    const rules = [rule({ customer_id: "c1", staff_id: "a", rate: 0.1, day_off_rate: 0.05 })];
+    const workedSet = attendanceWorkedSet([attendanceRow("a", "2026-07-01")]); // 7/2は休み
+    const rows = namedCustomerDetailRows(tabs, rules, "a", workedSet, 0.1);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => [r.worked, r.rate])).toEqual([
+      [true, 0.1],
+      [false, 0.05],
+    ]);
+    const total = namedCustomerCommission(tabs, rules, staffNameOf, workedSet, 0.1).find((c) => c.staffId === "a")!.commission;
+    expect(rows.reduce((a, r) => a + r.commission, 0)).toBeCloseTo(total);
+  });
+
+  it("primaryCustomerDetailRows lists the owner's customers' tabs and matches primaryCustomerSalesBreakdown", () => {
+    const tabs = [
+      tab({ customer_id: "c1", business_date: "2026-07-01", name: "客1", tab_items: [item({ price: 10000 })] }),
+      tab({ customer_id: "c1", business_date: "2026-07-02", name: "客1", tab_items: [item({ price: 5000 })] }),
+      tab({ customer_id: "c2", business_date: "2026-07-02", name: "他人の客", tab_items: [item({ price: 7000 })] }),
+    ];
+    const ownerOf = (customerId: string | null) => (customerId === "c1" ? "a" : customerId === "c2" ? "b" : null);
+    const workedSet = attendanceWorkedSet([attendanceRow("a", "2026-07-01")]);
+    const rows = primaryCustomerDetailRows(tabs, ownerOf, "a", workedSet, 0.1);
+    expect(rows.map((r) => [r.name, r.worked])).toEqual([
+      ["客1", true],
+      ["客1", false],
+    ]);
+    const sales = primaryCustomerSalesBreakdown(tabs, staffNameOf, ownerOf, workedSet, 0.1).find((r) => r.staffId === "a")!;
+    expect(rows.reduce((a, r) => a + r.amount, 0)).toBeCloseTo(sales.workedSales + sales.offDaySales);
   });
 });
