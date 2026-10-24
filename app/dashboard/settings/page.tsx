@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabaseClient";
 import { useStore, NameInputMode } from "@/lib/StoreContext";
 import { OwnerPinGate } from "@/lib/OwnerPinGate";
@@ -2827,7 +2828,11 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {payslipData && (
+      {/* 給与明細はページの外（body直下）に描く。<main>の中だと、フェードのアニメーションが重なり順を閉じ込めて
+          下のタブバーが明細の上に出てしまい、iPadでは内側のスクロールも効かなくなっていた */}
+      {payslipData &&
+        typeof document !== "undefined" &&
+        createPortal(
         <>
           <style>{`
             @media print {
@@ -2836,7 +2841,10 @@ export default function SettingsPage() {
               #payslip-print-area { position: absolute; top: 0; left: 0; width: 100%; }
             }
           `}</style>
-          <div className="fixed inset-0 z-50 bg-bg overflow-y-auto p-4 print:p-0 print:bg-white">
+          <div
+            className="fixed inset-0 z-[60] bg-bg overflow-y-auto overscroll-contain p-4 pb-10 print:p-0 print:bg-white"
+            style={{ WebkitOverflowScrolling: "touch" }}
+          >
             <div className="max-w-lg mx-auto flex justify-end gap-2 mb-4 print:hidden">
               <button
                 onClick={() => setPayslipData(null)}
@@ -3020,7 +3028,8 @@ export default function SettingsPage() {
             </div>
             {renderPayslipDetail(payslipData)}
           </div>
-        </>
+        </>,
+        document.body
       )}
     </div>
     </OwnerPinGate>
