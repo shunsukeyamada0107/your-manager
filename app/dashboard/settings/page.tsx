@@ -25,18 +25,10 @@ import {
   TabLog,
   TabWithItems,
   UNCATEGORIZED_LABEL,
-  hourlyLaborBreakdown,
   staffCommissionBreakdown,
   commissionTaxBasisResolver,
   totalSalesCommissionStaff,
   commissionRateResolver,
-  attendanceWorkedSet,
-  primaryCustomerOwnerResolver,
-  primaryCustomerSalesBreakdown,
-  slideScaleCommission,
-  commissionMonthNumber,
-  namedCustomerCommission,
-  companionAllowanceBreakdown,
   CommissionBasis,
   SnackPaySettings,
   SnackItemKind,
@@ -56,6 +48,7 @@ import {
   PrimaryCustomerDetailRow,
 } from "@/lib/types";
 import { DEFAULT_REPORT_TEMPLATE, REPORT_TEMPLATE_TOKENS } from "@/lib/reportTemplate";
+import { computePayslip } from "@/lib/payslip";
 import { StoreTheme } from "@/lib/theme";
 
 // クラブモードの給与計算方法（番号で選ぶ。増やす場合はここに追加し、給与明細の計算に分岐を足す）
@@ -757,112 +750,30 @@ export default function SettingsPage() {
         : Promise.resolve({ data: [] as Customer[] }),
     ]);
 
-    const isEligible = (staffId: string) => staff.find((x) => x.id === staffId)?.commission_eligible ?? true;
-    const nameOf = (id: string | null) => staff.find((x) => x.id === id)?.name ?? "(元スタッフ)";
-    const workedSet = attendanceWorkedSet((attData as Attendance[]) ?? []);
-    const ownerOf = primaryCustomerOwnerResolver((customersData as Customer[]) ?? [], staff);
-
-    const myCommission = staffCommissionBreakdown(
-      (tabsData as TabWithItems[]) ?? [],
-      nameOf,
-      taxRate,
-      commissionRate,
-      commissionScheme,
-      drinkBackAmount,
-      isEligible,
-      commissionTaxBasisResolver(staff, commissionTaxBasis),
-      totalSalesCommissionStaff(staff),
-      commissionRateResolver(staff, commissionRate),
-      ownerOf,
-      roundUnit
-    ).find((c) => c.staffId === payslipStaffId);
-    const isSnack = isTieredPayMethod;
-    // 給与計算方法2は通常の按分歩合を使わず、下の専用計算（売上バック・ボトルバック・指名料）に置き換える
-    const commission = isSnack ? 0 : myCommission?.commission ?? 0;
-    const personalSales = isSnack ? 0 : myCommission?.salesWithTax ?? 0;
-    const hourly = hourlyLaborBreakdown((attData as Attendance[]) ?? [], nameOf)[0] ?? null;
-
-    // 仕組み1：指名歩合（実際の接客者とは別に、指名された分だけ加算）
     const namedRules = (ruleRows as CustomerStaffCommissionRule[]) ?? [];
-    const namedCommission = namedRules.length
-      ? namedCustomerCommission((tabsData as TabWithItems[]) ?? [], namedRules, nameOf, workedSet, taxRate, roundUnit).find(
-          (c) => c.staffId === payslipStaffId
-        )?.commission ?? 0
-      : 0;
-
-    // 仕組み2：担当客の指名固定/スライド歩合（丸ごと帰属）
-    let primaryCustomerCommission = 0;
-    if (s.commission_mode !== "standard") {
-      const sales = primaryCustomerSalesBreakdown(
-        (tabsData as TabWithItems[]) ?? [],
-        nameOf,
-        ownerOf,
-        workedSet,
+    const pay = computePayslip({
+      staff: s,
+      staffList: staff,
+      tabs: (tabsData as TabWithItems[]) ?? [],
+      attendance: (attData as Attendance[]) ?? [],
+      customers: (customersData as Customer[]) ?? [],
+      namedRules,
+      menu,
+      periodStart: start,
+      config: {
+        storeMode,
+        tieredPayMethod: isTieredPayMethod,
         taxRate,
-        roundUnit
-      ).find((r) => r.staffId === payslipStaffId) ?? {
-        staffId: payslipStaffId,
-        name: s.name,
-        workedSales: 0,
-        offDaySales: 0,
-      };
-
-      if (s.commission_mode === "primary_customer_flat") {
-        primaryCustomerCommission = (sales.workedSales + sales.offDaySales) * (s.primary_customer_rate ?? 0);
-      } else if (s.commission_mode === "primary_customer_slide") {
-        const monthNumber = commissionMonthNumber(s.commission_start_date ?? start, start.slice(0, 7));
-        const slide = slideScaleCommission({
-          workedSales: sales.workedSales,
-          tiers: slideScaleTiers,
-          guaranteeAmount: s.primary_customer_guarantee_amount ?? 0,
-          guaranteeStartupRate: s.primary_customer_guarantee_startup_rate ?? 0,
-          guaranteeStartupMonths: s.primary_customer_guarantee_startup_months ?? 0,
-          monthNumber,
-        });
-        const offDayFlat = sales.offDaySales * (s.primary_customer_day_off_rate ?? 0);
-        primaryCustomerCommission = slide + offDayFlat;
-      }
-    }
-
-    // 同伴手当：この来店を同伴したスタッフとして指名された回数×本人の同伴手当単価（クラブモードのみ）。
-    // 給与計算方法2は伝票の同伴料の品目でも数える（品目が無い伝票は同伴ボタンで数える）
-    const companionAllowance = isTieredPayMethod
-      ? snackCompanionCount((tabsData as TabWithItems[]) ?? [], (customersData as Customer[]) ?? [], menu, payslipStaffId) *
-        // 同伴料は全額その子へ。スタッフごとの単価が未設定ならメニューの同伴料の金額を使う
-        (s.companion_allowance_amount ?? menu.find((m) => m.snack_item_kind === "companion")?.price ?? 0)
-      : storeMode === "club"
-        ? companionAllowanceBreakdown(
-            (tabsData as TabWithItems[]) ?? [],
-            nameOf,
-            (id) => staff.find((x) => x.id === id)?.companion_allowance_amount ?? 0
-          ).find((c) => c.staffId === payslipStaffId)?.amount ?? 0
-        : 0;
-
-    const base = s.base_salary ?? 0;
-    const allowance = s.special_allowance ?? 0;
-    const hourlyHours = hourly?.hours ?? 0;
-    const hourlyCost = hourly?.cost ?? 0;
-
-    const snackPay = isSnack
-      ? snackPayBreakdown(
-          (tabsData as TabWithItems[]) ?? [],
-          (customersData as Customer[]) ?? [],
-          menu,
-          snackSettings,
-          payslipStaffId,
-          companionAllowance,
-          taxRate
-        )
-      : null;
-    const gross =
-      base +
-      allowance +
-      commission +
-      namedCommission +
-      primaryCustomerCommission +
-      companionAllowance +
-      hourlyCost +
-      (snackPay ? snackPay.salesBack + snackPay.bottleBack + snackPay.nominationBack : 0);
+        commissionRate,
+        commissionScheme,
+        drinkBackAmount,
+        commissionTaxBasis,
+        slideScaleTiers,
+        roundUnit,
+        snackSettings,
+      },
+    });
+    const { workedSet, ownerOf } = pay;
 
     const tabList = (tabsData as TabWithItems[]) ?? [];
     const customerList = (customersData as Customer[]) ?? [];
@@ -892,18 +803,18 @@ export default function SettingsPage() {
     setPayslipData({
       staffName: s.name,
       monthLabel: label,
-      base,
-      allowance,
-      commission,
-      personalSales,
-      namedCustomerCommission: namedCommission,
-      primaryCustomerCommission,
-      companionAllowance,
-      hourlyHours,
-      hourlyCost,
-      total: gross,
+      base: pay.base,
+      allowance: pay.allowance,
+      commission: pay.commission,
+      personalSales: pay.personalSales,
+      namedCustomerCommission: pay.namedCommission,
+      primaryCustomerCommission: pay.primaryCustomerCommission,
+      companionAllowance: pay.companionAllowance,
+      hourlyHours: pay.hourlyHours,
+      hourlyCost: pay.hourlyCost,
+      total: pay.gross,
       dailyPaid: dailyPayByStaff((attData as Attendance[]) ?? []).get(payslipStaffId) ?? 0,
-      snack: snackPay ? { ...snackPay, ...snackDeductions(gross, snackSettings) } : null,
+      snack: pay.snack,
       detail,
     });
     setGeneratingPayslip(false);

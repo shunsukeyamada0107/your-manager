@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, Fragment } from "react";
+import { useEffect, useState, useCallback, useMemo, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabaseClient";
 import { signExpenseReceipts } from "@/lib/receiptStorage";
@@ -11,6 +11,11 @@ import { DateBar } from "@/lib/DateBar";
 import {
   Staff,
   Attendance,
+  Customer,
+  CustomerStaffCommissionRule,
+  MenuItem,
+  SnackPaySettings,
+  normalizeSnackPaySettings,
   Expense,
   TabWithItems,
   DaySummary,
@@ -33,6 +38,7 @@ import {
   totalSalesCommissionStaff,
   commissionRateResolver,
 } from "@/lib/types";
+import { computePayslip } from "@/lib/payslip";
 import { generateInsights } from "@/lib/insights";
 import { MonthlySalesChart, ChartPoint } from "@/lib/MonthlySalesChart";
 import { DEFAULT_REPORT_TEMPLATE, renderReportTemplate } from "@/lib/reportTemplate";
@@ -372,6 +378,24 @@ function buildLaborRows(
     .sort((a, b) => b.total - a.total);
 }
 
+// 今月の人件費（人別）。設定タブの給与明細と同じ計算（基本給・特別手当・時給分・歩合・同伴手当）の支給合計を使う
+type MonthLaborRow = {
+  staffId: string;
+  name: string;
+  hours: number;
+  wage: number | null;
+  base: number;
+  allowance: number;
+  hourlyCost: number;
+  commission: number; // 歩合系の合計（通常の歩合・指名歩合・担当客の歩合・売上バック類）
+  companion: number;
+  total: number; // 給与明細の支給合計
+  deduction: number | null; // 給与計算方法2のみ：名刺代と控除の合計
+  payable: number; // 日払いを引く前のお渡し額（給与計算方法2は名刺代・控除後）
+  dailyPaid: number;
+  comm: StaffCommission | null; // 通常の歩合の内訳（画面表示用）
+};
+
 export default function ReportPage() {
   const router = useRouter();
   const supabase = createClient();
@@ -388,6 +412,8 @@ export default function ReportPage() {
     showInsights,
     reportPinRequired,
     roundUnit,
+    storeMode,
+    slideScaleTiers,
     loading: storeLoading,
   } = useStore();
   const { date: businessDate, isToday, setDate: setBusinessDate } = useBusinessDate();
@@ -405,6 +431,13 @@ export default function ReportPage() {
   const [monthAttRaw, setMonthAttRaw] = useState<Attendance[]>([]);
   const [monthExpRaw, setMonthExpRaw] = useState<Expense[]>([]);
   const [exporting, setExporting] = useState(false);
+  // 月次の人件費を給与明細と同じ額にするために必要な、顧客・指名歩合ルール・メニュー・給与計算方法
+  const [payExtra, setPayExtra] = useState<{
+    customers: Customer[];
+    namedRules: CustomerStaffCommissionRule[];
+    menu: MenuItem[];
+    snackSettings: SnackPaySettings;
+  }>({ customers: [], namedRules: [], menu: [], snackSettings: normalizeSnackPaySettings(null) });
   const [showReportModal, setShowReportModal] = useState(false);
   const [copyLabel, setCopyLabel] = useState("コピーする");
   const [showChart, setShowChart] = useState(false);
@@ -611,6 +644,37 @@ export default function ReportPage() {
     loadData();
   }, [loadData]);
 
+  // 給与明細の計算に必要な店舗データ（日付に依らないので営業日を切り替えても読み直さない）
+  useEffect(() => {
+    if (!storeId) return;
+    let cancelled = false;
+    const isClub = storeMode === "club";
+    Promise.all([
+      supabase.from("menu_items").select("*").eq("store_id", storeId).eq("active", true),
+      isClub ? supabase.from("customers").select("*").eq("store_id", storeId) : Promise.resolve({ data: [] }),
+      isClub
+        ? supabase.from("customer_staff_commission_rules").select("*").eq("store_id", storeId)
+        : Promise.resolve({ data: [] }),
+      isClub
+        ? supabase.from("stores").select("snack_pay_settings").eq("id", storeId).maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]).then(([menuRes, custRes, ruleRes, storeRes]) => {
+      if (cancelled) return;
+      setPayExtra({
+        menu: (menuRes.data as MenuItem[]) ?? [],
+        customers: (custRes.data as Customer[]) ?? [],
+        namedRules: (ruleRes.data as CustomerStaffCommissionRule[]) ?? [],
+        snackSettings: normalizeSnackPaySettings(
+          (storeRes.data as { snack_pay_settings?: unknown } | null)?.snack_pay_settings
+        ),
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId, storeMode]);
+
   // 顧客検索：名前のあいまい検索で、日付を問わず全期間の伝票から探す（デバウンス付き）
   useEffect(() => {
     setExpandedCustomer(null);
@@ -754,7 +818,72 @@ export default function ReportPage() {
     roundUnit
   );
   const monthHourlyLabor = hourlyLaborBreakdown(monthAttRaw, staffName);
-  const monthLaborRows = buildLaborRows(monthHourlyLabor, monthCommission, staff, dailyPayByStaff(monthAttRaw));
+  const tieredPayMethod = storeMode === "club" && payExtra.snackSettings.method === 2;
+  const monthLaborRows = useMemo<MonthLaborRow[]>(() => {
+    const dailyPaid = dailyPayByStaff(monthAttRaw);
+    const rows: MonthLaborRow[] = [];
+    staff.forEach((s) => {
+      const pay = computePayslip({
+        staff: s,
+        staffList: staff,
+        tabs: monthTabsRaw,
+        attendance: monthAttRaw,
+        customers: payExtra.customers,
+        namedRules: payExtra.namedRules,
+        menu: payExtra.menu,
+        periodStart: monthStart,
+        config: {
+          storeMode,
+          tieredPayMethod,
+          taxRate,
+          commissionRate,
+          commissionScheme,
+          drinkBackAmount,
+          commissionTaxBasis,
+          slideScaleTiers,
+          roundUnit,
+          snackSettings: payExtra.snackSettings,
+        },
+      });
+      // 退職済み（非表示）のスタッフは、今月の実績が無ければ載せない
+      const variablePay = pay.gross - pay.base - pay.allowance;
+      if (!s.active && variablePay === 0 && pay.hourlyHours === 0) return;
+      if (pay.gross === 0 && pay.hourlyHours === 0) return;
+      rows.push({
+        staffId: s.id,
+        name: s.name,
+        hours: pay.hourlyHours,
+        wage: s.hourly_wage,
+        base: pay.base,
+        allowance: pay.allowance,
+        hourlyCost: pay.hourlyCost,
+        commission: pay.commission + pay.namedCommission + pay.primaryCustomerCommission + pay.snackBacks,
+        companion: pay.companionAllowance,
+        total: pay.gross,
+        deduction: pay.snack ? pay.snack.businessCardFee + pay.snack.deduction : null,
+        payable: pay.payable,
+        dailyPaid: dailyPaid.get(s.id) ?? 0,
+        comm: pay.myCommission ?? null,
+      });
+    });
+    return rows.sort((a, b) => b.total - a.total);
+  }, [
+    staff,
+    monthTabsRaw,
+    monthAttRaw,
+    payExtra,
+    monthStart,
+    storeMode,
+    tieredPayMethod,
+    taxRate,
+    commissionRate,
+    commissionScheme,
+    drinkBackAmount,
+    commissionTaxBasis,
+    slideScaleTiers,
+    roundUnit,
+  ]);
+  const monthLaborTotal = monthLaborRows.reduce((a, r) => a + r.total, 0);
 
   const todayAvgStay = avgStayMinutes(tabs);
   const monthAvgStay = avgStayMinutes(monthTabsRaw);
@@ -892,109 +1021,6 @@ export default function ReportPage() {
         });
       };
 
-      // --- 日報サマリー ---
-      const summarySheet = wb.addWorksheet("日報サマリー");
-      summarySheet.columns = [{ width: 18 }, { width: 16 }];
-      const titleRow = summarySheet.addRow(["日報", businessDate]);
-      titleRow.font = { bold: true, size: 13, color: { argb: GOLD } };
-      summarySheet.addRow([]);
-      const summaryData: [string, number][] = [
-        ["小計(税抜)", Math.round(summary.subtotal)],
-        ["消費税", Math.round(summary.tax)],
-        ["合計(税込)", Math.round(summary.total)],
-        ["人件費（歩合給+時給）", Math.round(summary.labor)],
-        ["経費", Math.round(summary.expense)],
-        ["粗利", Math.round(summary.profit)],
-      ];
-      summaryData.forEach(([label, value]) => {
-        const row = summarySheet.addRow([label, value]);
-        row.getCell(2).numFmt = '"¥"#,##0';
-        if (label === "粗利") row.font = { bold: true, color: { argb: GOLD } };
-      });
-      summarySheet.addRow([]);
-      [
-        ["現金", Math.round(summary.cash)],
-        ["カード", Math.round(summary.card)],
-        ["未収", Math.round(summary.receivable)],
-        ["未会計", Math.round(summary.unsettled)],
-      ].forEach(([label, value]) => {
-        const row = summarySheet.addRow([label, value]);
-        row.getCell(2).numFmt = '"¥"#,##0';
-      });
-
-      // --- 伝票別 ---
-      const tabSheet = wb.addWorksheet("伝票別");
-      tabSheet.columns = [
-        { header: "伝票名", key: "name", width: 16 },
-        { header: "担当スタッフ", key: "staff", width: 14 },
-        { header: "状態", key: "status", width: 10 },
-        { header: "会計方法", key: "method", width: 10 },
-        { header: "来店", key: "in", width: 10 },
-        { header: "退店", key: "out", width: 10 },
-        { header: "品数", key: "count", width: 8 },
-        { header: "小計", key: "subtotal", width: 12 },
-        { header: "消費税", key: "tax", width: 12 },
-        { header: "合計", key: "total", width: 12 },
-      ];
-      styleHeaderRow(tabSheet.getRow(1));
-      tabRows.forEach((t, i) => {
-        const row = tabSheet.addRow({
-          name: t.name,
-          staff: staffName(t.staff_id),
-          status: t.closed_at ? "会計済み" : "対応中",
-          method: tabPaymentParts(t)
-            .map((p) => `${PAYMENT_KIND_LABELS[p.method]}${p.amount != null ? Math.round(p.amount).toLocaleString() : ""}`)
-            .join("＋"),
-          in: new Date(t.created_at).toLocaleTimeString("ja-JP"),
-          out: t.closed_at ? new Date(t.closed_at).toLocaleTimeString("ja-JP") : "",
-          count: t.tab_items.reduce((a, x) => a + x.qty, 0),
-          subtotal: Math.round(tabSubtotal(t.tab_items)),
-          tax: Math.round(tabTax(t.tab_items, taxRate)),
-          total: Math.round(tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit)),
-        });
-        row.getCell("subtotal").numFmt = '"¥"#,##0';
-        row.getCell("tax").numFmt = '"¥"#,##0';
-        row.getCell("total").numFmt = '"¥"#,##0';
-        styleDataRow(row, i % 2 === 1);
-      });
-
-      // --- スタッフ別歩合 ---
-      const staffSheet = wb.addWorksheet("スタッフ別歩合");
-      staffSheet.columns = [
-        { header: "スタッフ", key: "name", width: 14 },
-        { header: "売上税抜", key: "exTax", width: 14 },
-        { header: "売上税込", key: "withTax", width: 14 },
-        { header: "歩合給", key: "commission", width: 14 },
-      ];
-      styleHeaderRow(staffSheet.getRow(1));
-      commission.forEach((c, i) => {
-        const row = staffSheet.addRow({
-          name: c.name,
-          exTax: Math.round(c.salesExTax),
-          withTax: Math.round(c.salesWithTax),
-          commission: Math.round(c.commission),
-        });
-        ["exTax", "withTax", "commission"].forEach((k) => (row.getCell(k).numFmt = '"¥"#,##0'));
-        row.getCell("commission").font = { bold: true, color: { argb: GOLD } };
-        styleDataRow(row, i % 2 === 1);
-      });
-
-      // --- 時給人件費 ---
-      if (hourlyLabor.length > 0) {
-        const hourlySheet = wb.addWorksheet("時給人件費");
-        hourlySheet.columns = [
-          { header: "スタッフ", key: "name", width: 14 },
-          { header: "勤務時間", key: "hours", width: 12 },
-          { header: "人件費", key: "cost", width: 14 },
-        ];
-        styleHeaderRow(hourlySheet.getRow(1));
-        hourlyLabor.forEach((h, i) => {
-          const row = hourlySheet.addRow({ name: h.name, hours: Number(h.hours.toFixed(1)), cost: Math.round(h.cost) });
-          row.getCell("cost").numFmt = '"¥"#,##0';
-          styleDataRow(row, i % 2 === 1);
-        });
-      }
-
       // --- 月の売上管理表：日ごとの売上高・原価・粗利益・組数・人数（月内の全日を1〜末日まで表示） ---
       const [monthYear, monthNum] = monthStart.split("-").map(Number);
       const daysInMonth = new Date(monthYear, monthNum, 0).getDate();
@@ -1041,41 +1067,62 @@ export default function ReportPage() {
       });
       [2, 3, 4, 7].forEach((c) => (totalRow.getCell(c).numFmt = '"¥"#,##0'));
 
-      // --- 人件費（人別・今月）：月次シートとは別のシートに独立させる ---
+      // --- 人件費（人別・今月）：給与明細と同じ額（基本給・特別手当・時給分・歩合・同伴手当の支給合計） ---
       const monthLaborSheet = wb.addWorksheet(`人件費(${monthLabel})`);
-      monthLaborSheet.columns = [
-        { header: "スタッフ", key: "name", width: 14 },
-        { header: "勤務時間", key: "hours", width: 12 },
-        { header: "時給人件費", key: "hourlyCost", width: 14 },
-        { header: "歩合給", key: "commission", width: 14 },
-        { header: "合計", key: "total", width: 14 },
-        { header: "日払い済み", key: "dailyPaid", width: 14 },
-        { header: "残り", key: "remaining", width: 14 },
+      const laborHeaders = [
+        "スタッフ",
+        "勤務時間",
+        "基本給",
+        "特別手当",
+        "時給分",
+        "歩合給",
+        "同伴手当",
+        "支給合計",
+        ...(tieredPayMethod ? ["名刺代・控除", "差引支給額"] : []),
+        "日払い済み",
+        "残り",
       ];
+      monthLaborSheet.columns = laborHeaders.map((header, i) => ({ header, width: i === 0 ? 14 : 14 }));
       styleHeaderRow(monthLaborSheet.getRow(1));
+      const totalCol = laborHeaders.indexOf("支給合計") + 1;
+      const yenCols = laborHeaders.map((_, i) => i + 1).filter((c) => c >= 3);
       monthLaborRows.forEach((r, i) => {
-        const row = monthLaborSheet.addRow({
-          name: r.name,
-          hours: r.hours != null ? Number(r.hours.toFixed(1)) : "",
-          hourlyCost: r.hourlyCost != null ? Math.round(r.hourlyCost) : "",
-          commission: r.commission != null ? Math.round(r.commission) : "",
-          total: Math.round(r.total),
-          dailyPaid: Math.round(r.dailyPaid),
-          remaining: Math.round(r.total - r.dailyPaid),
-        });
-        ["hourlyCost", "commission", "total", "dailyPaid", "remaining"].forEach(
-          (k) => (row.getCell(k).numFmt = '"¥"#,##0')
-        );
-        row.getCell("total").font = { bold: true, color: { argb: GOLD } };
+        const row = monthLaborSheet.addRow([
+          r.name,
+          r.hours > 0 ? Number(r.hours.toFixed(1)) : "",
+          Math.round(r.base),
+          Math.round(r.allowance),
+          Math.round(r.hourlyCost),
+          Math.round(r.commission),
+          Math.round(r.companion),
+          Math.round(r.total),
+          ...(tieredPayMethod ? [Math.round(r.deduction ?? 0), Math.round(r.payable)] : []),
+          Math.round(r.dailyPaid),
+          Math.round(r.payable - r.dailyPaid),
+        ]);
+        yenCols.forEach((c) => (row.getCell(c).numFmt = '"¥"#,##0'));
+        row.getCell(totalCol).font = { bold: true, color: { argb: GOLD } };
         styleDataRow(row, i % 2 === 1);
       });
-      const laborTotalRow = monthLaborSheet.addRow({ name: "合計", total: Math.round(monthTotal.labor) });
-      laborTotalRow.font = { bold: true };
-      laborTotalRow.getCell("total").numFmt = '"¥"#,##0';
+      const sumOf = (pick: (r: MonthLaborRow) => number) => Math.round(monthLaborRows.reduce((a, r) => a + pick(r), 0));
+      const laborTotalRow = monthLaborSheet.addRow([
+        "合計",
+        "",
+        sumOf((r) => r.base),
+        sumOf((r) => r.allowance),
+        sumOf((r) => r.hourlyCost),
+        sumOf((r) => r.commission),
+        sumOf((r) => r.companion),
+        sumOf((r) => r.total),
+        ...(tieredPayMethod ? [sumOf((r) => r.deduction ?? 0), sumOf((r) => r.payable)] : []),
+        sumOf((r) => r.dailyPaid),
+        sumOf((r) => r.payable - r.dailyPaid),
+      ]);
       laborTotalRow.eachCell((cell) => {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GOLD } };
         cell.font = { bold: true, color: { argb: DARK } };
       });
+      yenCols.forEach((c) => (laborTotalRow.getCell(c).numFmt = '"¥"#,##0'));
 
       if (prevMonthSummary) {
         monthSheet.addRow([]);
@@ -1101,7 +1148,7 @@ export default function ReportPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `YourManager_${businessDate}.xlsx`;
+      a.download = `YourManager_${monthStart.slice(0, 7)}.xlsx`;
       a.click();
       URL.revokeObjectURL(url);
     } finally {
@@ -1413,7 +1460,7 @@ export default function ReportPage() {
           <SectionHeader
             icon={<PeopleSectionIcon />}
             tone="blue"
-            right={<span className="text-sm font-mono text-[#6FB3E0] font-bold">計 {yen(monthTotal.labor)}</span>}
+            right={<span className="text-sm font-mono text-[#6FB3E0] font-bold">計 {yen(monthLaborTotal)}</span>}
           >
             人件費（人別・今月）
           </SectionHeader>
@@ -1430,27 +1477,40 @@ export default function ReportPage() {
                     <span className="text-gray-300 font-bold">{r.name}</span>
                     <span className="font-mono text-[#6FB3E0] font-bold">{yen(r.total)}</span>
                   </div>
-                  {r.hours != null && (
+                  {(r.base > 0 || r.allowance > 0) && (
                     <div className="text-xs text-gray-400">
-                      時間 {r.hours.toFixed(1)}h ・ 時給 {r.wage != null ? yen(r.wage) : "未設定"} ・ 人件費{" "}
-                      {yen(r.hourlyCost ?? 0)}
+                      基本給 {yen(r.base)}
+                      {r.allowance > 0 && <> ・ 特別手当 {yen(r.allowance)}</>}
                     </div>
                   )}
-                  {r.salesWithTax != null && (
-                    <div className="text-xs text-gray-400">担当売上 {yen(r.salesWithTax)}</div>
+                  {r.hours > 0 && (
+                    <div className="text-xs text-gray-400">
+                      時間 {r.hours.toFixed(1)}h ・ 時給 {r.wage != null ? yen(r.wage) : "未設定"} ・ 時給分{" "}
+                      {yen(r.hourlyCost)}
+                    </div>
                   )}
-                  {r.commission != null &&
-                    (commissionScheme === "drink_back" ? (
+                  {r.comm && !tieredPayMethod && (
+                    <div className="text-xs text-gray-400">担当売上 {yen(r.comm.salesWithTax)}</div>
+                  )}
+                  {r.commission !== 0 &&
+                    (r.comm && !tieredPayMethod && commissionScheme === "drink_back" ? (
                       <div className="text-xs text-gray-400">
-                        売上バック {yen(r.salesBack ?? 0)} ・ 🍾ドリンクバック {yen(r.drinkBack ?? 0)}（
-                        {r.drinkCount ?? 0}杯）
+                        売上バック {yen(r.comm.salesBack ?? 0)} ・ 🍾ドリンクバック {yen(r.comm.drinkBack ?? 0)}（
+                        {r.comm.drinkCount ?? 0}杯）
+                        {r.commission !== r.comm.commission && <> ・ 歩合給合計 {yen(r.commission)}</>}
                       </div>
                     ) : (
-                      <div className="text-xs text-gray-400">売上（歩合給） {yen(r.commission)}</div>
+                      <div className="text-xs text-gray-400">歩合給 {yen(r.commission)}</div>
                     ))}
+                  {r.companion !== 0 && <div className="text-xs text-gray-400">同伴手当 {yen(r.companion)}</div>}
+                  {r.deduction != null && (
+                    <div className="text-xs text-gray-400">
+                      名刺代・控除 −{yen(r.deduction)} ・ 差引支給額 {yen(r.payable)}
+                    </div>
+                  )}
                   {r.dailyPaid > 0 && (
                     <div className="text-xs text-warn">
-                      日払い済み {yen(r.dailyPaid)} ・ 残り {yen(r.total - r.dailyPaid)}
+                      日払い済み {yen(r.dailyPaid)} ・ 残り {yen(r.payable - r.dailyPaid)}
                     </div>
                   )}
                 </div>
