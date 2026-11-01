@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo, Fragment } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabaseClient";
 import { signExpenseReceipts } from "@/lib/receiptStorage";
@@ -486,9 +486,17 @@ export default function ReportPage() {
     router.push(`/dashboard?tab=${t.id}`);
   }
 
+  // 日付や月を素早く切り替えると読み込みが重なり、遅れて返った古い月のデータが新しい月の表示に上書きされることがある。
+  // 最後に始めた読み込みの結果だけを反映する（古い読み込みは途中で打ち切る）
+  const loadSeq = useRef(0);
+
   const loadData = useCallback(async () => {
     if (!storeId) return;
+    const seq = ++loadSeq.current;
+    const isStale = () => seq !== loadSeq.current;
+
     const { data: staffData } = await supabase.from("staff").select("*").eq("store_id", storeId);
+    if (isStale()) return;
     setStaff(staffData ?? []);
 
     const { data: tabsData } = await supabase
@@ -496,6 +504,7 @@ export default function ReportPage() {
       .select("*, tab_items(*), tab_payments(*)")
       .eq("store_id", storeId)
       .eq("business_date", businessDate);
+    if (isStale()) return;
     setTabs((tabsData as TabWithItems[]) ?? []);
 
     const { data: attData } = await supabase
@@ -503,6 +512,7 @@ export default function ReportPage() {
       .select("*")
       .eq("store_id", storeId)
       .eq("business_date", businessDate);
+    if (isStale()) return;
     setAttendance(attData ?? []);
 
     const { data: expData } = await supabase
@@ -510,7 +520,9 @@ export default function ReportPage() {
       .select("*")
       .eq("store_id", storeId)
       .eq("business_date", businessDate);
-    setExpenses(await signExpenseReceipts(supabase, expData ?? []));
+    const signedExpenses = await signExpenseReceipts(supabase, expData ?? []);
+    if (isStale()) return;
+    setExpenses(signedExpenses);
 
     const [
       { data: monthTabs },
@@ -557,6 +569,7 @@ export default function ReportPage() {
         .gte("business_date", prevMonthStart)
         .lte("business_date", prevMonthEnd),
     ]);
+    if (isStale()) return;
 
     const dates = new Set<string>();
     (monthTabs ?? []).forEach((t: TabWithItems) => dates.add(t.business_date));
@@ -603,10 +616,12 @@ export default function ReportPage() {
           ),
         };
       });
+    const signedMonthExpenses = await signExpenseReceipts(supabase, (monthExp as Expense[]) ?? []);
+    if (isStale()) return;
     setMonthRows(rows);
     setMonthTabsRaw((monthTabs as TabWithItems[]) ?? []);
     setMonthAttRaw((monthAtt as Attendance[]) ?? []);
-    setMonthExpRaw(await signExpenseReceipts(supabase, (monthExp as Expense[]) ?? []));
+    setMonthExpRaw(signedMonthExpenses);
     setPrevMonthSummary(
       daySummary(
         (prevTabs as TabWithItems[]) ?? [],
@@ -994,6 +1009,11 @@ export default function ReportPage() {
   }
 
   async function exportExcel() {
+    // 月を切り替えた直後など、表示中の月と読み込み済みの日別データの月が食い違っている間は、日別が空のファイルになってしまうので出力しない
+    if (monthRows.some((r) => !r.date.startsWith(monthStart.slice(0, 7)))) {
+      window.alert("データを読み込み中です。数秒待ってから、もう一度Excel出力してください。");
+      return;
+    }
     setExporting(true);
     try {
       const ExcelJS = (await import("exceljs")).default;
