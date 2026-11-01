@@ -1022,7 +1022,6 @@ export default function ReportPage() {
       const GOLD = "FFDCA84E";
       const DARK = "FF11142A";
       const BAND = "FFE0F7FA";
-      const ROSE = "FFCE5468";
       const BORDER: import("exceljs").Border = { style: "thin", color: { argb: "FFDDDDDD" } };
 
       const styleHeaderRow = (row: import("exceljs").Row) => {
@@ -1143,25 +1142,6 @@ export default function ReportPage() {
         cell.font = { bold: true, color: { argb: DARK } };
       });
       yenCols.forEach((c) => (laborTotalRow.getCell(c).numFmt = '"¥"#,##0'));
-
-      if (prevMonthSummary) {
-        monthSheet.addRow([]);
-        const cmpHeader = monthSheet.addRow([`${prevMonthLabel}比`, "今月", "先月", "増減%"]);
-        cmpHeader.font = { bold: true };
-        (
-          [
-            ["売上(税込)", monthTotal.total, prevMonthSummary.total],
-            ["経費", monthTotal.expense, prevMonthSummary.expense],
-            ["粗利", monthTotal.profit, prevMonthSummary.profit],
-          ] as const
-        ).forEach(([label, now, prev]) => {
-          const change = pctChange(now, prev);
-          const row = monthSheet.addRow([label, Math.round(now), Math.round(prev), change != null ? Math.round(change) : ""]);
-          row.getCell(2).numFmt = '"¥"#,##0';
-          row.getCell(3).numFmt = '"¥"#,##0';
-          if (change != null) row.getCell(4).font = { color: { argb: change >= 0 ? GOLD : ROSE } };
-        });
-      }
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
