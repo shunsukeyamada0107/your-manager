@@ -24,12 +24,17 @@ import {
   tabCompanionIds,
   tabDiscountAmount,
   tabPaymentParts,
+  ReceivableGroup,
+  groupReceivables,
+  receivableGroupKey,
   tabSubtotal,
   tabTax,
   tabTotal,
   UNCATEGORIZED_LABEL,
 } from "@/lib/types";
 import { AnimatedNumber } from "@/lib/AnimatedNumber";
+import { ReceivableCollectModal } from "@/lib/ReceivableCollectModal";
+import { fetchReceivableTabs } from "@/lib/receivables";
 
 const LAST_ORDER_WINDOW_MS = 30 * 60 * 1000;
 
@@ -239,6 +244,9 @@ function POSPageInner() {
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
   const [splitRows, setSplitRows] = useState<{ method: PaymentKind; amount: string; staffId: string }[]>([]);
   const [splitSaving, setSplitSaving] = useState(false);
+  // 開いている伝票のお客様の未収（全期間）。レジでその場で回収を記録できるようにする
+  const [customerReceivable, setCustomerReceivable] = useState<ReceivableGroup | null>(null);
+  const [showCollectModal, setShowCollectModal] = useState(false);
   const [modalName, setModalName] = useState("");
   const [nameSearchResults, setNameSearchResults] = useState<TabWithItems[]>([]);
   const [searchingName, setSearchingName] = useState(false);
@@ -494,6 +502,29 @@ function POSPageInner() {
   }
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+
+  // 開いた伝票のお客様に未回収の未収があれば読み込む（お客様に紐づく伝票は顧客、それ以外は同じ伝票名で探す）
+  const activeTabIdForReceivable = activeTab?.id ?? null;
+  const activeReceivableKey = activeTab ? receivableGroupKey(activeTab) : null;
+  const loadCustomerReceivable = useCallback(async () => {
+    if (!storeId || !activeTab) {
+      setCustomerReceivable(null);
+      return;
+    }
+    try {
+      const found = await fetchReceivableTabs(supabase, storeId, {
+        customerId: activeTab.customer_id,
+        name: activeTab.name,
+      });
+      setCustomerReceivable(groupReceivables(found, taxRate, roundUnit, true)[0] ?? null);
+    } catch {
+      setCustomerReceivable(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId, activeTabIdForReceivable, activeReceivableKey, taxRate, roundUnit]);
+  useEffect(() => {
+    loadCustomerReceivable();
+  }, [loadCustomerReceivable]);
 
   // メニューをカテゴリごとに分類。カテゴリ未設定は「その他」扱いで、メニューの並び順（sort_order）通りに出現順でタブ化する
   const menuCategories: string[] = [];
@@ -1009,6 +1040,7 @@ function POSPageInner() {
     // 分割払い・未収の内訳も消す（先に伝票を未会計に戻してから消すので、途中で失敗しても二重計上にならない）
     if (!error) await supabase.from("tab_payments").delete().eq("tab_id", activeTab.id);
     loadData();
+    loadCustomerReceivable();
   }
 
   // 分割払い・未収の内訳入力を開く。会計済みの伝票なら今の内訳を初期値にして、後から内訳を直せるようにする
@@ -1044,6 +1076,7 @@ function POSPageInner() {
     }
     setSplitTabId(null);
     loadData();
+    loadCustomerReceivable();
     if (!wasClosed) setShowReceipt(true);
   }
 
@@ -1137,7 +1170,7 @@ function POSPageInner() {
             onClick={() => openSplitSettle(tab)}
             className="w-full rounded-xl border border-line py-2.5 text-sm font-bold text-gray-300"
           >
-            お支払い内訳を変更（未収の回収など）
+            お支払い内訳を変更
           </button>
         </div>
       );
@@ -1647,6 +1680,27 @@ function POSPageInner() {
               </Link>
             )}
 
+            {customerReceivable && customerReceivable.remaining > 0 && (
+              <div className="rounded-lg border border-warn/50 bg-warn/10 px-3 py-2.5 space-y-1.5">
+                <div className="flex justify-between items-baseline gap-2">
+                  <span className="text-sm font-bold text-warn">このお客様の未収（{customerReceivable.entries.length}件）</span>
+                  <span className="font-mono font-bold text-warn text-lg">
+                    ¥{customerReceivable.remaining.toLocaleString()}
+                  </span>
+                </div>
+                <div className="text-xs text-gray-400">
+                  発生日: {customerReceivable.entries.map((e) => e.businessDate.slice(5).replace("-", "/")).join("・")}
+                  ／ 回収は消費税のかからない「未収の回収」で記録します（自由入力欄には入れないでください）
+                </div>
+                <button
+                  onClick={() => setShowCollectModal(true)}
+                  className="w-full rounded-lg bg-gold text-bg py-2 text-sm font-bold active:scale-[0.97] transition-transform"
+                >
+                  未収を回収する
+                </button>
+              </div>
+            )}
+
             {notifyPermission === "default" && (
               <button
                 onClick={requestNotifyPermission}
@@ -2033,6 +2087,18 @@ function POSPageInner() {
         </div>
       )}
 
+      {showCollectModal && customerReceivable && (
+        <ReceivableCollectModal
+          customerName={customerReceivable.name}
+          entries={customerReceivable.entries}
+          onClose={() => setShowCollectModal(false)}
+          onDone={() => {
+            setShowCollectModal(false);
+            loadCustomerReceivable();
+          }}
+        />
+      )}
+
       {splitTabId &&
         (() => {
           const tab = tabs.find((t) => t.id === splitTabId);
@@ -2156,7 +2222,7 @@ function POSPageInner() {
                   </div>
                 )}
                 <div className="text-xs text-gray-500">
-                  「未収」は後日お支払いいただく分です。回収できたら、この画面で「お支払い内訳を変更」から現金やカードに入れ替えてください。
+                  「未収」は後日お支払いいただく分です。回収したときは、この画面ではなく、お客様の伝票または集計タブの「未収管理」から「未収を回収」で記録してください（消費税はかかりません）。
                 </div>
                 <div
                   className={`flex justify-between text-sm font-mono ${

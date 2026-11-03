@@ -100,6 +100,18 @@ export type TabPayment = {
   created_at: string;
 };
 
+// 未収の回収記録。売上・消費税とは無関係で、未収が発生した伝票（tab_id）に紐づく
+export type ReceivableCollection = {
+  id: string;
+  store_id: string;
+  tab_id: string;
+  amount: number;
+  method: PaymentMethod;
+  collected_on: string; // 回収した日（営業日）
+  note: string | null;
+  created_at: string;
+};
+
 export type Tab = {
   id: string;
   store_id: string;
@@ -120,6 +132,7 @@ export type Tab = {
   created_at: string; // 来店
   closed_at: string | null; // 退店・会計
   tab_payments?: TabPayment[]; // 支払い内訳（分割払い・未収）。無い・空なら payment_method の1回払いとして扱う
+  receivable_collections?: ReceivableCollection[]; // 未収の回収記録（読み込んだときだけ入る）
 };
 
 export type TabItem = {
@@ -256,6 +269,127 @@ export function tabTotal(
 ) {
   const raw = tabPreDiscountTotal(items, taxRate) - tabDiscountAmount(items, taxRate, discountPercent, discountAmount);
   return roundUpToUnit(raw, roundUnit);
+}
+
+// ---- 未収管理：未収が残っている伝票・お客様ごとの一覧 ----
+
+export type ReceivableEntry = {
+  tab: TabWithItems;
+  tabId: string;
+  businessDate: string; // 未収が発生した日
+  name: string;
+  total: number; // 伝票のお会計金額
+  receivable: number; // うち未収として記録した額（円）
+  collected: number; // 回収済みの額
+  remaining: number; // 未回収の残り（0以上）
+  collections: ReceivableCollection[]; // 回収の履歴（回収日の古い順）
+};
+
+// 会計済みの伝票1枚の未収の状況。未収が無い・未会計の伝票はnull。
+// 未収額は支払い内訳（tab_payments）のreceivable。会計後に金額が変わって内訳と合わなくなった場合は、売上合計への按分と同じ比率で換算する
+export function tabReceivableEntry(
+  t: TabWithItems,
+  taxRate: number = DEFAULT_TAX_RATE,
+  roundUnit: number = DEFAULT_ROUND_UNIT
+): ReceivableEntry | null {
+  if (!t.closed_at) return null;
+  const total = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
+  const alloc = tabPaymentAllocation(t, total);
+  const receivable = Math.round(alloc?.receivable ?? 0);
+  if (receivable <= 0) return null;
+  const collections = [...(t.receivable_collections ?? [])].sort(
+    (a, b) => a.collected_on.localeCompare(b.collected_on) || a.created_at.localeCompare(b.created_at)
+  );
+  const collected = collections.reduce((a, c) => a + c.amount, 0);
+  return {
+    tab: t,
+    tabId: t.id,
+    businessDate: t.business_date,
+    name: t.name,
+    total,
+    receivable,
+    collected,
+    remaining: Math.max(0, receivable - collected),
+    collections,
+  };
+}
+
+export type ReceivableGroup = {
+  key: string; // customer_id。顧客に紐づかない伝票は「name:伝票名」
+  customerId: string | null;
+  name: string;
+  entries: ReceivableEntry[]; // 未収が発生した日の古い順
+  receivable: number;
+  collected: number;
+  remaining: number;
+};
+
+export function receivableGroupKey(t: Pick<Tab, "customer_id" | "name">): string {
+  return t.customer_id ?? `name:${t.name.trim()}`;
+}
+
+// 未収が発生した伝票を、お客様（顧客に紐づかない伝票は伝票名）ごとにまとめる。
+// onlyOutstanding=trueなら未回収が残る伝票だけ（すべて回収済みのお客様は出さない）。残りの多いお客様から並べる
+export function groupReceivables(
+  tabs: TabWithItems[],
+  taxRate: number = DEFAULT_TAX_RATE,
+  roundUnit: number = DEFAULT_ROUND_UNIT,
+  onlyOutstanding = true
+): ReceivableGroup[] {
+  const map = new Map<string, ReceivableGroup>();
+  tabs.forEach((t) => {
+    const entry = tabReceivableEntry(t, taxRate, roundUnit);
+    if (!entry) return;
+    if (onlyOutstanding && entry.remaining <= 0) return;
+    const key = receivableGroupKey(t);
+    let g = map.get(key);
+    if (!g) {
+      g = { key, customerId: t.customer_id, name: t.name, entries: [], receivable: 0, collected: 0, remaining: 0 };
+      map.set(key, g);
+    }
+    g.entries.push(entry);
+    g.receivable += entry.receivable;
+    g.collected += entry.collected;
+    g.remaining += entry.remaining;
+  });
+  const groups = Array.from(map.values());
+  groups.forEach((g) =>
+    g.entries.sort((a, b) => a.businessDate.localeCompare(b.businessDate) || a.tab.created_at.localeCompare(b.tab.created_at))
+  );
+  return groups.sort((a, b) => b.remaining - a.remaining || a.name.localeCompare(b.name, "ja"));
+}
+
+// 回収した金額を、未収が発生した日の古い伝票から順に割り当てる（entriesは古い順で渡す）。
+// 残りを超えた分はleftoverとして返す（割り当てない）
+export function allocateCollection(
+  entries: { tabId: string; remaining: number }[],
+  amount: number
+): { allocations: { tabId: string; amount: number }[]; leftover: number } {
+  let left = Math.max(0, Math.round(amount));
+  const allocations: { tabId: string; amount: number }[] = [];
+  for (const e of entries) {
+    if (left <= 0) break;
+    const take = Math.min(left, Math.max(0, e.remaining));
+    if (take > 0) {
+      allocations.push({ tabId: e.tabId, amount: take });
+      left -= take;
+    }
+  }
+  return { allocations, leftover: left };
+}
+
+// 回収記録の合計を、現金と電子決済（カード・PayPay等）に分ける（日報の現金精算に使う）
+export function collectionTotals(collections: Pick<ReceivableCollection, "amount" | "method">[]): {
+  cash: number;
+  electronic: number;
+} {
+  let cash = 0;
+  let electronic = 0;
+  collections.forEach((c) => {
+    if (c.method === "cash") cash += c.amount;
+    else electronic += c.amount;
+  });
+  return { cash, electronic };
 }
 
 // 同伴したスタッフのid一覧。companion_staff_ids（複数）を優先し、無ければ旧列companion_staff_id（1人）を使う

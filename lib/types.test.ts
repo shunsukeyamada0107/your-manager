@@ -33,6 +33,11 @@ import {
   snackDeductions,
   snackCompanionCount,
   attendanceDetailRows,
+  tabReceivableEntry,
+  groupReceivables,
+  allocateCollection,
+  collectionTotals,
+  ReceivableCollection,
   companionDetailRows,
   namedCustomerDetailRows,
   primaryCustomerDetailRows,
@@ -1270,5 +1275,96 @@ describe("payslip detail rows", () => {
     ]);
     const sales = primaryCustomerSalesBreakdown(tabs, staffNameOf, ownerOf, workedSet, 0.1).find((r) => r.staffId === "a")!;
     expect(rows.reduce((a, r) => a + r.amount, 0)).toBeCloseTo(sales.workedSales + sales.offDaySales);
+  });
+});
+
+describe("receivables (未収管理)", () => {
+  const pay = (method: TabPayment["method"], amount: number): TabPayment => ({
+    id: Math.random().toString(36),
+    store_id: "s",
+    tab_id: "t",
+    method,
+    amount,
+    created_at: "2026-07-01T23:00:00+09:00",
+  });
+  const col = (tabId: string, amount: number, collected_on: string, method: ReceivableCollection["method"] = "cash"): ReceivableCollection => ({
+    id: Math.random().toString(36),
+    store_id: "s",
+    tab_id: tabId,
+    amount,
+    method,
+    collected_on,
+    note: null,
+    created_at: `${collected_on}T20:00:00+09:00`,
+  });
+  // 合計11000円のうち 現金5000＋未収6000
+  const receivableTab = (overrides: Partial<TabWithItems> = {}) =>
+    tab({
+      customer_id: "c1",
+      name: "田中様",
+      tab_items: [item({ price: 10000 })],
+      tab_payments: [pay("cash", 5000), pay("receivable", 6000)],
+      ...overrides,
+    });
+
+  it("computes receivable, collected and remaining for one tab, with collection history in date order", () => {
+    const t = receivableTab({
+      id: "t1",
+      receivable_collections: [col("t1", 1000, "2026-07-10"), col("t1", 2000, "2026-07-05", "card")],
+    });
+    const e = tabReceivableEntry(t, 0.1)!;
+    expect(e.total).toBe(11000);
+    expect(e.receivable).toBe(6000);
+    expect(e.collected).toBe(3000);
+    expect(e.remaining).toBe(3000);
+    expect(e.collections.map((c) => c.collected_on)).toEqual(["2026-07-05", "2026-07-10"]);
+  });
+
+  it("returns null for open tabs and tabs without a receivable", () => {
+    expect(tabReceivableEntry(receivableTab({ closed_at: null }), 0.1)).toBeNull();
+    expect(tabReceivableEntry(tab({ tab_items: [item({ price: 1000 })] }), 0.1)).toBeNull();
+  });
+
+  it("never reports a negative remaining even if collections exceed the receivable", () => {
+    const t = receivableTab({ id: "t1", receivable_collections: [col("t1", 9000, "2026-07-10")] });
+    expect(tabReceivableEntry(t, 0.1)!.remaining).toBe(0);
+  });
+
+  it("groups by customer, oldest first, hiding settled customers unless asked", () => {
+    const a1 = receivableTab({ id: "a1", business_date: "2026-07-03" });
+    const a0 = receivableTab({ id: "a0", business_date: "2026-07-01" });
+    const b1 = receivableTab({ id: "b1", customer_id: "c2", name: "鈴木様", receivable_collections: [col("b1", 6000, "2026-07-09")] });
+    const noCustomer = receivableTab({ id: "n1", customer_id: null, name: "テバ" });
+    const groups = groupReceivables([a1, a0, b1, noCustomer], 0.1);
+    expect(groups.map((g) => g.key)).toEqual(["c1", "name:テバ"]); // c2は完済で非表示、c1は残り12000で先頭
+    expect(groups[0].entries.map((e) => e.tabId)).toEqual(["a0", "a1"]);
+    expect(groups[0].remaining).toBe(12000);
+    expect(groupReceivables([a1, a0, b1, noCustomer], 0.1, 10, false).map((g) => g.key)).toContain("c2");
+  });
+
+  it("allocates a collection to the oldest tabs first and reports any excess", () => {
+    const r = allocateCollection(
+      [
+        { tabId: "a0", remaining: 6000 },
+        { tabId: "a1", remaining: 6000 },
+      ],
+      8000
+    );
+    expect(r.allocations).toEqual([
+      { tabId: "a0", amount: 6000 },
+      { tabId: "a1", amount: 2000 },
+    ]);
+    expect(r.leftover).toBe(0);
+    expect(allocateCollection([{ tabId: "a0", remaining: 1000 }], 5000)).toEqual({
+      allocations: [{ tabId: "a0", amount: 1000 }],
+      leftover: 4000,
+    });
+  });
+
+  it("splits collection totals into cash and electronic", () => {
+    expect(collectionTotals([col("t", 1000, "2026-07-01"), col("t", 500, "2026-07-01", "paypay"), col("t", 300, "2026-07-01", "card")])).toEqual({
+      cash: 1000,
+      electronic: 800,
+    });
   });
 });

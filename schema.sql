@@ -227,6 +227,21 @@ create table tab_payments (
   created_at  timestamptz not null default now()
 );
 
+-- ------------------------------------------------------------
+-- 6c. 未収の回収記録。伝票の支払い内訳に「未収」を入れた分を、後日回収した日付・方法・金額で記録する。
+--     売上・消費税とは無関係（売上は未収が発生した伝票の営業日に計上済み）。日報の現金には回収した日に加える
+-- ------------------------------------------------------------
+create table receivable_collections (
+  id            uuid primary key default gen_random_uuid(),
+  store_id      uuid not null references stores(id) on delete cascade,
+  tab_id        uuid not null references tabs(id) on delete cascade, -- 未収が発生した伝票
+  amount        numeric not null check (amount > 0),
+  method        text not null check (method in ('cash','card','paypay','other_epayment')),
+  collected_on  date not null, -- 回収した日（営業日）
+  note          text,
+  created_at    timestamptz not null default now()
+);
+
 -- 伝票の作成・削除・来店退店時刻の修正ログ（設定タブで確認用。特に削除・時刻修正は
 -- 不正やデータ修正の見える化が目的なので、変更内容をスナップショットとして残す）
 create table tab_logs (
@@ -381,6 +396,7 @@ alter table menu_items    enable row level security;
 alter table tabs          enable row level security;
 alter table tab_items     enable row level security;
 alter table tab_payments  enable row level security;
+alter table receivable_collections enable row level security;
 alter table tab_logs      enable row level security;
 alter table attendance    enable row level security;
 alter table expenses      enable row level security;
@@ -473,6 +489,12 @@ create policy "store members can access their tab payments"
 create policy "org members can view their organization's tab payments"
   on tab_payments for select using (store_id in (select my_org_store_ids()));
 
+create policy "store members can access their receivable collections"
+  on receivable_collections for all using (store_id in (select my_store_ids()));
+
+create policy "org members can view their organization's receivable collections"
+  on receivable_collections for select using (store_id in (select my_org_store_ids()));
+
 create policy "store members can view their tab logs"
   on tab_logs for select to authenticated
   using (store_id in (select my_store_ids()));
@@ -553,6 +575,8 @@ create index if not exists idx_expenses_store_business_date on expenses(store_id
 create index if not exists idx_tab_items_tab_id on tab_items(tab_id);
 create index if not exists idx_tab_payments_tab_id on tab_payments(tab_id);
 create index if not exists idx_tab_payments_store_id on tab_payments(store_id);
+create index if not exists idx_receivable_collections_tab_id on receivable_collections(tab_id);
+create index if not exists idx_receivable_collections_store_date on receivable_collections(store_id, collected_on);
 
 -- my_org_store_ids()が組織側RLSポリシーの起点になるため重要
 create index if not exists idx_organization_members_user_id on organization_members(user_id);

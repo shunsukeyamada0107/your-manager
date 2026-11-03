@@ -23,6 +23,9 @@ import {
   StaffCommission,
   PAYMENT_KIND_EMOJI,
   PAYMENT_KIND_LABELS,
+  ReceivableCollection,
+  collectionTotals,
+  tabReceivableEntry,
   itemSubtotal,
   tabPaymentAllocation,
   tabPaymentParts,
@@ -416,7 +419,7 @@ export default function ReportPage() {
     slideScaleTiers,
     loading: storeLoading,
   } = useStore();
-  const { date: businessDate, isToday, setDate: setBusinessDate } = useBusinessDate();
+  const { date: businessDate, isToday } = useBusinessDate();
   const { start: monthStart, end: monthEnd, label: monthLabel } = monthRange(new Date(`${businessDate}T12:00:00`));
   const prevMonthAnchor = new Date(`${monthStart}T12:00:00`);
   prevMonthAnchor.setMonth(prevMonthAnchor.getMonth() - 1);
@@ -450,40 +453,12 @@ export default function ReportPage() {
   const [searchingCustomer, setSearchingCustomer] = useState(false);
   const [expandedCustomer, setExpandedCustomer] = useState<string | null>(null);
   const [viewingTab, setViewingTab] = useState<TabWithItems | null>(null);
-  // 未収伝票一覧：全期間の未収（後日回収する分）が残っている伝票。開いたときに読み込む
-  const [showReceivables, setShowReceivables] = useState(false);
-  const [receivableTabs, setReceivableTabs] = useState<TabWithItems[]>([]);
-  const [loadingReceivables, setLoadingReceivables] = useState(false);
+  // 回収した未収（receivable_collections）。日報の現金精算には、未収が発生した日ではなく回収した日に加える
+  const [dayCollections, setDayCollections] = useState<ReceivableCollection[]>([]);
+  const [monthCollections, setMonthCollections] = useState<ReceivableCollection[]>([]);
 
-  async function openReceivables() {
-    if (!storeId) return;
-    setShowReceivables(true);
-    setLoadingReceivables(true);
-    const { data: rows } = await supabase
-      .from("tab_payments")
-      .select("tab_id")
-      .eq("store_id", storeId)
-      .eq("method", "receivable");
-    const tabIds = Array.from(new Set((rows ?? []).map((r: { tab_id: string }) => r.tab_id)));
-    if (tabIds.length === 0) {
-      setReceivableTabs([]);
-      setLoadingReceivables(false);
-      return;
-    }
-    const { data: tabRows } = await supabase
-      .from("tabs")
-      .select("*, tab_items(*), tab_payments(*)")
-      .eq("store_id", storeId)
-      .in("id", tabIds)
-      .order("business_date", { ascending: true });
-    setReceivableTabs((tabRows as TabWithItems[]) ?? []);
-    setLoadingReceivables(false);
-  }
-
-  // 伝票画面で開いて、内訳を変更して回収できるようにする（その伝票の営業日に切り替えて遷移）
-  function openTabForCollection(t: TabWithItems) {
-    setBusinessDate(t.business_date);
-    router.push(`/dashboard?tab=${t.id}`);
+  function openReceivables() {
+    router.push("/dashboard/receivables");
   }
 
   // 日付や月を素早く切り替えると読み込みが重なり、遅れて返った古い月のデータが新しい月の表示に上書きされることがある。
@@ -531,10 +506,11 @@ export default function ReportPage() {
       { data: prevTabs },
       { data: prevAtt },
       { data: prevExp },
+      { data: monthColl },
     ] = await Promise.all([
       supabase
         .from("tabs")
-        .select("*, tab_items(*), tab_payments(*)")
+        .select("*, tab_items(*), tab_payments(*), receivable_collections(*)")
         .eq("store_id", storeId)
         .gte("business_date", monthStart)
         .lte("business_date", monthEnd),
@@ -568,6 +544,13 @@ export default function ReportPage() {
         .eq("store_id", storeId)
         .gte("business_date", prevMonthStart)
         .lte("business_date", prevMonthEnd),
+      // 今月に回収した未収（発生した月は問わない）。日報の現金には回収した日に加える
+      supabase
+        .from("receivable_collections")
+        .select("*")
+        .eq("store_id", storeId)
+        .gte("collected_on", monthStart)
+        .lte("collected_on", monthEnd),
     ]);
     if (isStale()) return;
 
@@ -622,6 +605,9 @@ export default function ReportPage() {
     setMonthTabsRaw((monthTabs as TabWithItems[]) ?? []);
     setMonthAttRaw((monthAtt as Attendance[]) ?? []);
     setMonthExpRaw(signedMonthExpenses);
+    const monthCollList = (monthColl as ReceivableCollection[]) ?? [];
+    setMonthCollections(monthCollList);
+    setDayCollections(monthCollList.filter((c) => c.collected_on === businessDate));
     setPrevMonthSummary(
       daySummary(
         (prevTabs as TabWithItems[]) ?? [],
@@ -776,6 +762,9 @@ export default function ReportPage() {
   const laborRows = buildLaborRows(hourlyLabor, commission, staff, dailyPayByStaff(attendance));
   // その営業日に日払いでレジから渡した合計（現金精算でレジの現金から差し引く）
   const dayDailyPaid = attendance.reduce((a, x) => a + (x.daily_pay ?? 0), 0);
+  // 本日回収した未収（現金・電子決済）。売上には入れず、現金は封筒・レジの現金に加える
+  const dayCollected = collectionTotals(dayCollections);
+  const monthCollected = collectionTotals(monthCollections);
   const tabRows = [...tabs].sort(
     (a, b) => Number(!!a.closed_at) - Number(!!b.closed_at) || tabSubtotal(b.tab_items) - tabSubtotal(a.tab_items)
   );
@@ -944,11 +933,12 @@ export default function ReportPage() {
 
     const coupon50Today = tabRows.filter((t) => t.discount_percent === 50).length;
     const coupon50Month = monthTabsRaw.filter((t) => t.discount_percent === 50).length;
-    // 今月の未収一覧：まだ会計していない伝票は合計額を、会計済みで未収の分がある伝票はその未収額を出す
+    // 今月の未収一覧：まだ会計していない伝票は合計額を、会計済みで未収の分がある伝票は未回収の残りを出す（回収済みの分は引く）
     const monthUnsettled = monthTabsRaw
       .map((t) => {
-        const tot = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
-        const owed = t.closed_at ? tabPaymentAllocation(t, tot)?.receivable ?? 0 : tot;
+        const owed = t.closed_at
+          ? tabReceivableEntry(t, taxRate, roundUnit)?.remaining ?? 0
+          : tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
         return { name: t.name, owed };
       })
       .filter((t) => t.owed > 0);
@@ -1279,9 +1269,15 @@ export default function ReportPage() {
             onClick={openReceivables}
             className="col-span-2 grid grid-cols-2 items-center text-left active:opacity-60"
           >
-            <span className="text-gold underline decoration-dotted">未収 ›</span>
+            <span className="text-gold underline decoration-dotted">未収（発生）›</span>
             <span className="text-right">{yen(summary.receivable)}</span>
           </button>
+          {dayCollected.cash + dayCollected.electronic > 0 && (
+            <>
+              <span className="text-gray-400">未収の回収（本日）</span>
+              <span className="text-right">{yen(dayCollected.cash + dayCollected.electronic)}</span>
+            </>
+          )}
           <span className="text-gray-400">未会計</span>
           <span className="text-right">{yen(summary.unsettled)}</span>
           <span className="text-gray-400">平均滞在時間</span>
@@ -1294,6 +1290,12 @@ export default function ReportPage() {
         <div className="grid grid-cols-2 gap-y-1 text-sm font-mono">
           <span className="text-gray-400">現金売上</span>
           <span className="text-right">{yen(summary.cash)}</span>
+          {dayCollected.cash > 0 && (
+            <>
+              <span className="text-gray-400">未収の回収（現金）</span>
+              <span className="text-right">+{yen(dayCollected.cash)}</span>
+            </>
+          )}
           <span className="text-gray-400">経費（現金支払い分）</span>
           <span className="text-right">−{yen(summary.expense)}</span>
           {dayDailyPaid > 0 && (
@@ -1303,11 +1305,15 @@ export default function ReportPage() {
             </>
           )}
           <span className="text-gray-300 font-bold">封筒に入れる現金</span>
-          <span className="text-right text-gold font-bold">{yen(summary.cash - summary.expense - dayDailyPaid)}</span>
+          <span className="text-right text-gold font-bold">
+            {yen(summary.cash + dayCollected.cash - summary.expense - dayDailyPaid)}
+          </span>
           <span className="text-gray-400 mt-2">金庫に残す現金（釣り銭元金）</span>
           <span className="text-right mt-2">{yen(cashFloatAmount)}</span>
           <span className="text-gray-400">レジにあるはずの現金合計</span>
-          <span className="text-right">{yen(summary.cash - summary.expense - dayDailyPaid + cashFloatAmount)}</span>
+          <span className="text-right">
+            {yen(summary.cash + dayCollected.cash - summary.expense - dayDailyPaid + cashFloatAmount)}
+          </span>
         </div>
       </div>
 
@@ -1448,9 +1454,15 @@ export default function ReportPage() {
               onClick={openReceivables}
               className="col-span-2 grid grid-cols-2 items-center text-left active:opacity-60"
             >
-              <span className="text-[#6FB3E0] underline decoration-dotted">未収 ›</span>
+              <span className="text-[#6FB3E0] underline decoration-dotted">未収（発生）›</span>
               <span className="text-right">{yen(monthTotal.receivable)}</span>
             </button>
+            {monthCollected.cash + monthCollected.electronic > 0 && (
+              <>
+                <span className="text-gray-400">未収の回収（今月）</span>
+                <span className="text-right">{yen(monthCollected.cash + monthCollected.electronic)}</span>
+              </>
+            )}
             <span className="text-gray-400">平均滞在時間</span>
             <span className="text-right">{monthAvgStay != null ? formatMinutes(monthAvgStay) : "—"}</span>
           </div>
@@ -1722,71 +1734,6 @@ export default function ReportPage() {
           </div>
         </div>
       )}
-
-      {showReceivables &&
-        (() => {
-          const owed = receivableTabs.map((t) => {
-            const tot = tabTotal(t.tab_items, taxRate, t.discount_percent, t.discount_amount, roundUnit);
-            return { tab: t, total: tot, receivable: tabPaymentAllocation(t, tot)?.receivable ?? 0 };
-          });
-          const totalOwed = owed.reduce((a, o) => a + o.receivable, 0);
-          return (
-            <div
-              className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
-              onClick={() => setShowReceivables(false)}
-            >
-              <div
-                onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-md max-h-[85vh] flex flex-col rounded-xl border border-line bg-elevated p-4 space-y-3"
-              >
-                <div className="flex justify-between items-start gap-2">
-                  <div>
-                    <div className="text-gold font-bold text-base">未収伝票一覧</div>
-                    <div className="text-xs text-gray-400 mt-0.5">全期間で、まだ回収していない未収が残っている伝票です</div>
-                  </div>
-                  <button onClick={() => setShowReceivables(false)} className="text-gray-400 text-sm shrink-0">
-                    閉じる
-                  </button>
-                </div>
-                <div className="flex justify-between items-baseline rounded-lg bg-bg2 px-3 py-2">
-                  <span className="text-sm text-gray-300">未収の合計（{owed.length}件）</span>
-                  <span className="font-mono font-bold text-gold text-lg">{yen(totalOwed)}</span>
-                </div>
-                <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
-                  {loadingReceivables ? (
-                    <div className="text-sm text-gray-500 text-center py-8">読み込み中...</div>
-                  ) : owed.length === 0 ? (
-                    <div className="text-sm text-gray-500 text-center py-8 border border-dashed border-line rounded-xl">
-                      未収の伝票はありません
-                    </div>
-                  ) : (
-                    owed.map(({ tab: t, total, receivable }) => (
-                      <button
-                        key={t.id}
-                        onClick={() => openTabForCollection(t)}
-                        className="w-full text-left rounded-lg border border-line bg-bg2 px-3 py-2.5 active:bg-line"
-                      >
-                        <div className="flex justify-between items-baseline gap-2">
-                          <span className="font-bold text-gray-200 truncate">{t.name}</span>
-                          <span className="font-mono font-bold text-warn shrink-0">{yen(receivable)}</span>
-                        </div>
-                        <div className="flex justify-between text-xs text-gray-500 mt-0.5">
-                          <span>
-                            {t.business_date}・会計 {yen(total)}
-                          </span>
-                          <span className="text-gold">伝票を開く ›</span>
-                        </div>
-                      </button>
-                    ))
-                  )}
-                </div>
-                <div className="text-xs text-gray-500">
-                  伝票を開いたら「お支払い内訳を変更」で、回収した分を現金やカードに入れ替えてください
-                </div>
-              </div>
-            </div>
-          );
-        })()}
 
       {viewingTab && (
         <div
