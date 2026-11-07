@@ -393,7 +393,7 @@ type MonthLaborRow = {
   commission: number; // 歩合系の合計（通常の歩合・指名歩合・担当客の歩合・売上バック類）
   companion: number;
   total: number; // 給与明細の支給合計
-  deduction: number | null; // 給与計算方法2のみ：名刺代と控除の合計
+  deduction: number | null; // 給与計算方法2のみ：名刺代・控除・カード手数料の合計
   payable: number; // 日払いを引く前のお渡し額（給与計算方法2は名刺代・控除後）
   dailyPaid: number;
   comm: StaffCommission | null; // 通常の歩合の内訳（画面表示用）
@@ -864,7 +864,7 @@ export default function ReportPage() {
         commission: pay.commission + pay.namedCommission + pay.primaryCustomerCommission + pay.snackBacks,
         companion: pay.companionAllowance,
         total: pay.gross,
-        deduction: pay.snack ? pay.snack.businessCardFee + pay.snack.deduction : null,
+        deduction: pay.snack ? pay.snack.businessCardFee + pay.snack.deduction + pay.snack.cardFee : null,
         payable: pay.payable,
         dailyPaid: dailyPaid.get(s.id) ?? 0,
         comm: pay.myCommission ?? null,
@@ -1087,7 +1087,7 @@ export default function ReportPage() {
         "歩合給",
         "同伴手当",
         "支給合計",
-        ...(tieredPayMethod ? ["名刺代・控除", "差引支給額"] : []),
+        ...(tieredPayMethod ? ["名刺代・控除・カード手数料", "差引支給額"] : []),
         "日払い済み",
         "残り",
       ];
@@ -1517,7 +1517,7 @@ export default function ReportPage() {
                   {r.companion !== 0 && <div className="text-xs text-gray-400">同伴手当 {yen(r.companion)}</div>}
                   {r.deduction != null && (
                     <div className="text-xs text-gray-400">
-                      名刺代・控除 −{yen(r.deduction)} ・ 差引支給額 {yen(r.payable)}
+                      名刺代・控除・カード手数料 −{yen(r.deduction)} ・ 差引支給額 {yen(r.payable)}
                     </div>
                   )}
                   {r.dailyPaid > 0 && (

@@ -137,8 +137,9 @@ export function computePayslip({
 
   // 同伴手当：この来店を同伴したスタッフとして指名された回数×本人の同伴手当単価（クラブモードのみ）。
   // 給与計算方法2は伝票の同伴料の品目でも数える（品目が無い伝票は同伴ボタンで数える）
+  const snackCompanions = config.tieredPayMethod ? snackCompanionCount(closedTabs, customers, menu, s.id) : 0;
   const companionAllowance = config.tieredPayMethod
-    ? snackCompanionCount(closedTabs, customers, menu, s.id) *
+    ? snackCompanions *
       // 同伴料は全額その子へ。スタッフごとの単価が未設定ならメニューの同伴料の金額を使う
       (s.companion_allowance_amount ?? menu.find((m) => m.snack_item_kind === "companion")?.price ?? 0)
     : config.storeMode === "club"
@@ -155,7 +156,10 @@ export function computePayslip({
   const hourlyCost = hourly?.cost ?? 0;
 
   const snackPay = isSnack
-    ? snackPayBreakdown(closedTabs, customers, menu, config.snackSettings, s.id, companionAllowance, config.taxRate)
+    ? snackPayBreakdown(closedTabs, customers, menu, config.snackSettings, s.id, companionAllowance, config.taxRate, {
+        workDays: new Set(myAttendance.map((a) => a.business_date)).size,
+        companionCount: snackCompanions,
+      })
     : null;
   const snackBacks = snackPay ? snackPay.salesBack + snackPay.bottleBack + snackPay.nominationBack : 0;
   const gross =
@@ -168,7 +172,7 @@ export function computePayslip({
     hourlyCost +
     snackBacks;
 
-  const snack = snackPay ? { ...snackPay, ...snackDeductions(gross, config.snackSettings) } : null;
+  const snack = snackPay ? { ...snackPay, ...snackDeductions(gross, config.snackSettings, snackPay.cardFee) } : null;
 
   return {
     base,

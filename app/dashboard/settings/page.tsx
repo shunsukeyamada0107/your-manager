@@ -1055,6 +1055,13 @@ export default function SettingsPage() {
                 "外すと、税・テーブルチャージ抜きの小計で数えます"
               )}
               {check("deductBottleCost", "酒代（ボトルの原価）を引く", "原価はメニュー管理でボトルごとに入力します")}
+              {d.deductBottleCost && (
+                <div className="pl-6 flex flex-wrap items-center gap-2 text-sm text-gray-300">
+                  酒代を引いた後の売上が
+                  {num(d.bottleCostHalfOver, (v) => set({ bottleCostHalfOver: v }), "円を超えたら、酒代は半分だけ引く")}
+                  <span className="block w-full text-xs text-gray-500">0にすると、いつも全額引きます</span>
+                </div>
+              )}
               {check("deductCompanion", "その子に付与した同伴料を引く")}
               {check("deductNomination", "その子に付与した口座料（指名料）を引く")}
               {check("includeBottleToOthersInSales", "口座のお客様が他の子に下ろしたボトルも、口座の子の売上に含める")}
@@ -1101,8 +1108,42 @@ export default function SettingsPage() {
             名刺代（毎月）{num(d.businessCardFee, (v) => set({ businessCardFee: v }), "円")}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
-            控除（名刺代を引いた後に）{num(d.deductionRate, (v) => set({ deductionRate: v }), "%", 100)}
+            控除（名刺代・カード手数料を引いた後に）{num(d.deductionRate, (v) => set({ deductionRate: v }), "%", 100)}
           </div>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
+            カード手数料（口座のお客様のカード払い1回ごと）
+            {num(d.cardFeePerPayment, (v) => set({ cardFeePerPayment: v }), "円をお給料から引く（控除の前。0=引かない）")}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
+            売上バックの同伴条件：出勤日数 ÷
+            {num(d.companionQuotaDivisor, (v) => set({ companionQuotaDivisor: v }), "回（切り捨て）の同伴が必要")}
+            <span className="block w-full text-xs text-gray-500">
+              届かない月は売上バックなし（ボトルバック・口座料・同伴料は支払う）。0にすると条件なし
+            </span>
+          </div>
+          {staff.length > 0 && (
+            <div>
+              <div className="text-xs text-gray-400 mb-1">売上バック・ボトルバックをつけないスタッフ（ママなど）</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {staff.filter((st) => st.active || d.noBackStaffIds.includes(st.id)).map((st) => (
+                  <label key={st.id} className="flex items-center gap-1.5 text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={d.noBackStaffIds.includes(st.id)}
+                      onChange={(e) =>
+                        set({
+                          noBackStaffIds: e.target.checked
+                            ? [...d.noBackStaffIds, st.id]
+                            : d.noBackStaffIds.filter((x) => x !== st.id),
+                        })
+                      }
+                    />
+                    {st.name}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         )}
         {d.method === 2 && (
@@ -2815,7 +2856,8 @@ export default function SettingsPage() {
                     <>
                       <tr className="border-b border-gray-100 text-gray-500 text-xs">
                         <td className="py-1.5">
-                          口座売上 ¥{Math.round(payslipData.snack.nominatedSales).toLocaleString()} − 酒代 ¥
+                          口座売上 ¥{Math.round(payslipData.snack.nominatedSales).toLocaleString()} − 酒代
+                          {payslipData.snack.bottleCostHalved ? "（半分）" : ""} ¥
                           {Math.round(payslipData.snack.bottleCost).toLocaleString()} − 同伴料 ¥
                           {Math.round(payslipData.snack.companionDeduction).toLocaleString()} − 口座料 ¥
                           {Math.round(payslipData.snack.nominationDeduction).toLocaleString()}
@@ -2827,6 +2869,12 @@ export default function SettingsPage() {
                       <tr className="border-b border-gray-200">
                         <td className="py-2.5">
                           キャスト売上バック（{Math.round(payslipData.snack.salesBackRate * 1000) / 10}%）
+                          {payslipData.snack.companionRequired > 0 && (
+                            <span className="block text-xs text-gray-500">
+                              同伴 {payslipData.snack.companionCount}回 / 必要 {payslipData.snack.companionRequired}回
+                              {payslipData.snack.companionQuotaMet ? "（クリア）" : "（届かないので売上バックなし）"}
+                            </span>
+                          )}
                         </td>
                         <td className="py-2.5 text-right font-mono">
                           ¥{Math.round(payslipData.snack.salesBack).toLocaleString()}
@@ -2894,6 +2942,14 @@ export default function SettingsPage() {
                           −¥{Math.round(payslipData.snack.businessCardFee).toLocaleString()}
                         </td>
                       </tr>
+                      {payslipData.snack.cardFee > 0 && (
+                        <tr className="border-b border-gray-200">
+                          <td className="py-2.5">カード手数料（{payslipData.snack.cardPayments}回）</td>
+                          <td className="py-2.5 text-right font-mono">
+                            −¥{Math.round(payslipData.snack.cardFee).toLocaleString()}
+                          </td>
+                        </tr>
+                      )}
                       <tr className="border-b border-gray-200">
                         <td className="py-2.5">控除（{Math.round(snackSettings.deductionRate * 1000) / 10}%）</td>
                         <td className="py-2.5 text-right font-mono">

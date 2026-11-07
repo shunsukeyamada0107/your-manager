@@ -1185,6 +1185,80 @@ describe("snack mode pay", () => {
     expect(d.net).toBeCloseTo(284472);
   });
 
+  it("deducts only half the bottle cost when sales after the full cost are over the threshold", () => {
+    const big = [
+      tab({
+        customer_id: "c-a",
+        tab_items: [item({ name: "SET", price: 13000, qty: 80 }), item({ name: "ヴーヴ", price: 30000, qty: 10 })],
+      }),
+    ]; // 1,040,000 + 300,000、原価80,000
+    const half = { ...s, bottleCostHalfOver: 1000000 };
+    const r = snackPayBreakdown(big, customers, menus, half, "a", 0);
+    expect(r.bottleCostHalved).toBe(true); // 1,340,000 − 80,000 = 1,260,000 > 100万
+    expect(r.bottleCost).toBe(40000);
+    expect(r.salesBackBase).toBe(1300000);
+    // 100万以下なら全額
+    const small = [tab({ customer_id: "c-a", tab_items: [item({ name: "ヴーヴ", price: 30000 })] })];
+    expect(snackPayBreakdown(small, customers, menus, half, "a", 0).bottleCost).toBe(8000);
+    // 0=使わない
+    expect(snackPayBreakdown(big, customers, menus, s, "a", 0).bottleCost).toBe(80000);
+  });
+
+  it("counts card payments of the cast's own customers and takes the fee after the deduction", () => {
+    const tabs = [
+      tab({ customer_id: "c-a", payment_method: "card", tab_items: [item({ name: "SET", price: 13000 })] }),
+      tab({ customer_id: "c-a", payment_method: "cash", tab_items: [item({ name: "SET", price: 13000 })] }),
+      tab({ customer_id: "c-b", payment_method: "card", tab_items: [item({ name: "SET", price: 13000 })] }),
+      // 分割払い：カードの支払いの担当がa
+      tab({
+        customer_id: "c-b",
+        payment_method: null,
+        tab_payments: [
+          { id: "p1", store_id: "s", tab_id: "t", method: "card", amount: 5000, staff_id: "a", created_at: "" },
+          { id: "p2", store_id: "s", tab_id: "t", method: "cash", amount: 8000, staff_id: null, created_at: "" },
+        ],
+        tab_items: [item({ name: "SET", price: 13000 })],
+      }),
+    ];
+    const fee = { ...s, cardFeePerPayment: 500 };
+    const r = snackPayBreakdown(tabs, customers, menus, fee, "a", 0);
+    expect(r.cardPayments).toBe(2);
+    expect(r.cardFee).toBe(1000);
+    const d = snackDeductions(103000, fee, r.cardFee);
+    expect(d.deduction).toBeCloseTo(9900); // （103,000−3,000−1,000）×10%
+    expect(d.net).toBeCloseTo(103000 - 3000 - 1000 - 9900);
+    expect(snackPayBreakdown(tabs, customers, menus, s, "a", 0).cardFee).toBe(0);
+  });
+
+  it("gives no sales back when companions are below work days ÷ 4 (rounded down)", () => {
+    const tabs = [
+      tab({ customer_id: "c-a", tab_items: [item({ name: "SET", price: 13000, qty: 20 })] }),
+      tab({ customer_id: "c-shop", tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "a" })] }),
+    ];
+    const q = { ...s, companionQuotaDivisor: 4 };
+    const short = snackPayBreakdown(tabs, customers, menus, q, "a", 0, undefined, { workDays: 16, companionCount: 3 });
+    expect(short.companionRequired).toBe(4);
+    expect(short.companionQuotaMet).toBe(false);
+    expect(short.salesBack).toBe(0);
+    expect(short.bottleBack).toBeCloseTo(3000); // ボトルバックはそのまま
+    const ok = snackPayBreakdown(tabs, customers, menus, q, "a", 0, undefined, { workDays: 15, companionCount: 3 });
+    expect(ok.companionRequired).toBe(3); // 3.75 → 3
+    expect(ok.salesBack).toBeCloseTo(260000 * 0.02);
+    // 条件なし（0）なら同伴0回でも出る
+    expect(snackPayBreakdown(tabs, customers, menus, s, "a", 0).salesBack).toBeCloseTo(260000 * 0.02);
+  });
+
+  it("gives no sales back or bottle back to staff marked as no-back", () => {
+    const tabs = [
+      tab({ customer_id: "c-a", tab_items: [item({ name: "SET", price: 13000, qty: 20 })] }),
+      tab({ customer_id: "c-shop", tab_items: [item({ name: "ヴーヴ", price: 30000, staff_id: "a" })] }),
+    ];
+    const r = snackPayBreakdown(tabs, customers, menus, { ...s, noBackStaffIds: ["a"] }, "a", 0);
+    expect(r.salesBackBase).toBe(260000);
+    expect(r.salesBack).toBe(0);
+    expect(r.bottleBack).toBe(0);
+  });
+
   it("fills missing settings with defaults and ignores wrong types", () => {
     const n = normalizeSnackPaySettings({ stepRate: 0.02, deductBottleCost: "yes" });
     expect(n.stepRate).toBe(0.02);

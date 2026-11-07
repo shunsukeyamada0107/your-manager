@@ -1051,6 +1051,10 @@ export type SnackPaySettings = {
   nominationFullBack: boolean; // 指名料を全額その子のバックにする
   businessCardFee: number; // 毎月差し引く名刺代（円）
   deductionRate: number; // （支給合計−名刺代）に掛ける控除率（例: 0.10）
+  bottleCostHalfOver: number; // 酒代を全額引いた後の売上がこの金額を超えたら、酒代は半分だけ引く（0=使わない、いつも全額）
+  cardFeePerPayment: number; // 口座のお客様がカードで払った1回ごとに、その子のお給料から引く手数料（円、0=引かない）
+  noBackStaffIds: string[]; // キャスト売上バック・ボトルバックをつけないスタッフ（ママなど）
+  companionQuotaDivisor: number; // 出勤日数÷この数（切り捨て）の同伴回数に届かない月は売上バックなし（0=条件なし）
 };
 
 export const DEFAULT_SNACK_PAY_SETTINGS: SnackPaySettings = {
@@ -1069,6 +1073,10 @@ export const DEFAULT_SNACK_PAY_SETTINGS: SnackPaySettings = {
   nominationFullBack: true,
   businessCardFee: 3000,
   deductionRate: 0.1,
+  bottleCostHalfOver: 0,
+  cardFeePerPayment: 0,
+  noBackStaffIds: [],
+  companionQuotaDivisor: 0,
 };
 
 // DBのjsonb（未設定・一部の項目だけ等）を、既定値で補った完全な設定にする
@@ -1096,7 +1104,8 @@ export function snackSalesBackRate(amount: number, stepAmount: number, stepRate:
 
 export type SnackPayBreakdown = {
   nominatedSales: number; // 指名客の売上（割引反映後。salesIncludeTaxなら税・テーブルチャージ込み、それ以外は抜き）
-  bottleCost: number; // 引いた酒代
+  bottleCost: number; // 引いた酒代（半分にした場合は半分の額）
+  bottleCostHalved: boolean; // 売上が大きいので酒代を半分だけ引いた
   companionDeduction: number; // 引いた同伴料（この子に付与した同伴手当の合計）
   salesBackBase: number; // 売上バックの元（上の差し引き後）
   salesBackRate: number;
@@ -1104,6 +1113,11 @@ export type SnackPayBreakdown = {
   bottleBack: number; // 指名客以外から下ろしてもらったボトルのバック
   nominationBack: number; // 口座料（指名料）の全額バック
   nominationDeduction: number; // 売上バックの元から引いた口座料（この子に付与した分）
+  cardPayments: number; // 口座のお客様がカードで払った回数
+  cardFee: number; // そのカード手数料の合計（お給料から引く）
+  companionCount: number; // その月の同伴回数
+  companionRequired: number; // 売上バックに必要な同伴回数（条件なしは0）
+  companionQuotaMet: boolean; // 必要な同伴回数に届いたか（届かなければ売上バックなし）
   tabs: SnackPayTabRow[]; // 上の売上・バックの伝票ごとの内訳（給与明細の突き合わせ用）
 };
 
@@ -1158,7 +1172,8 @@ export function snackPayBreakdown(
   settings: SnackPaySettings,
   staffId: string,
   companionAllowanceTotal: number, // この子に付与した同伴料の合計（設定により売上バックの元から引く）
-  taxRate: number = DEFAULT_TAX_RATE
+  taxRate: number = DEFAULT_TAX_RATE,
+  attendanceInfo: { workDays: number; companionCount: number } = { workDays: 0, companionCount: 0 } // 同伴回数の条件用
 ): SnackPayBreakdown {
   const primaryOf = new Map(customers.map((c) => [c.id, c.primary_staff_id]));
   const menuOf = snackMenuResolver(menuItems);
@@ -1166,6 +1181,7 @@ export function snackPayBreakdown(
   let bottleCost = 0;
   let bottleBack = 0;
   let nominationBack = 0;
+  let cardPayments = 0;
   const tabRows: SnackPayTabRow[] = [];
 
   tabs.forEach((t) => {
@@ -1180,6 +1196,14 @@ export function snackPayBreakdown(
     // 分割払いで支払った人ごとに担当が違えば、その金額の比率で指名売上を分ける
     const shares = tabSalesShares(t, nominator);
     const myShare = shares.get(staffId) ?? 0;
+    // カード払いの回数：分割払いは支払いごとの担当（空なら口座の子）、1回払いは口座の子
+    if (t.tab_payments?.length) {
+      t.tab_payments.forEach((p) => {
+        if (p.method === "card" && p.amount > 0 && (p.staff_id ?? nominator) === staffId) cardPayments += 1;
+      });
+    } else if (t.payment_method === "card" && nominator === staffId) {
+      cardPayments += 1;
+    }
 
     t.tab_items.forEach((i) => {
       const amount = itemSubtotal(i) * keepRatio;
@@ -1226,24 +1250,42 @@ export function snackPayBreakdown(
     if (row.sales !== 0 || row.bottleBack !== 0 || row.nominationBack !== 0) tabRows.push(row);
   });
 
-  const deductedCost = settings.deductBottleCost ? bottleCost : 0;
   // 同伴料は、伝票に入った額ではなく、この子に実際に付与した分だけを最後に引く
   const companionDeduction = settings.deductCompanion ? companionAllowanceTotal : 0;
   const nominationDeduction = settings.deductNomination ? nominationBack : 0;
+  const fullCost = settings.deductBottleCost ? bottleCost : 0;
+  // 酒代を全額引いた後の売上（ホステス売上）が基準額を超えたら、酒代は半分だけ引く（基準額ちょうどは全額）
+  const bottleCostHalved =
+    settings.bottleCostHalfOver > 0 &&
+    fullCost > 0 &&
+    nominatedSales - fullCost - companionDeduction - nominationDeduction > settings.bottleCostHalfOver;
+  const deductedCost = bottleCostHalved ? fullCost / 2 : fullCost;
   const salesBackBase = Math.max(0, nominatedSales - deductedCost - companionDeduction - nominationDeduction);
-  const salesBackRate = settings.salesBackEnabled
-    ? snackSalesBackRate(salesBackBase, settings.stepAmount, settings.stepRate)
-    : 0;
+  const noBack = settings.noBackStaffIds.includes(staffId);
+  // 出勤日数÷4（切り捨て）回の同伴をしていない月は売上バックなし（ボトルバック・口座料・同伴料はそのまま）
+  const companionRequired =
+    settings.companionQuotaDivisor > 0 ? Math.floor(attendanceInfo.workDays / settings.companionQuotaDivisor) : 0;
+  const companionQuotaMet = attendanceInfo.companionCount >= companionRequired;
+  const salesBackRate =
+    settings.salesBackEnabled && !noBack && companionQuotaMet
+      ? snackSalesBackRate(salesBackBase, settings.stepAmount, settings.stepRate)
+      : 0;
   return {
     nominatedSales,
     bottleCost: deductedCost,
+    bottleCostHalved,
     companionDeduction,
     salesBackBase,
     salesBackRate,
     salesBack: salesBackBase * salesBackRate,
-    bottleBack,
+    bottleBack: noBack ? 0 : bottleBack,
     nominationBack,
     nominationDeduction,
+    cardPayments,
+    cardFee: cardPayments * Math.max(0, settings.cardFeePerPayment),
+    companionCount: attendanceInfo.companionCount,
+    companionRequired,
+    companionQuotaMet,
     tabs: tabRows.sort((a, b) => a.businessDate.localeCompare(b.businessDate)),
   };
 }
@@ -1390,10 +1432,10 @@ export function primaryCustomerDetailRows(
   return rows.sort((a, b) => a.businessDate.localeCompare(b.businessDate));
 }
 
-// 支給合計から名刺代を引き、その残りに控除率を掛けた額を控除する
-export function snackDeductions(gross: number, settings: SnackPaySettings) {
+// 支給合計から名刺代とカード手数料を引き、その残りに控除率を掛けた額を控除する
+export function snackDeductions(gross: number, settings: SnackPaySettings, cardFee = 0) {
   const businessCardFee = Math.min(Math.max(0, gross), settings.businessCardFee);
-  const afterFee = gross - businessCardFee;
+  const afterFee = gross - businessCardFee - cardFee;
   const deduction = Math.max(0, afterFee) * settings.deductionRate;
-  return { businessCardFee, deduction, net: afterFee - deduction };
+  return { businessCardFee, deduction, cardFee, net: afterFee - deduction };
 }
