@@ -305,14 +305,21 @@ function POSPageInner() {
       : []),
   ];
 
+  // 割引ボタンや品目追加の直後など、読み込みが重なると、遅れて返った古い読み込みが新しい状態を上書きして
+  // 合計が一瞬（または次の操作まで）おかしな金額になる。最後に始めた読み込みの結果だけを反映する
+  const loadSeq = useRef(0);
+
   const loadData = useCallback(async () => {
     if (!storeId) return;
+    const seq = ++loadSeq.current;
+    const isStale = () => seq !== loadSeq.current;
     const { data: menuData } = await supabase
       .from("menu_items")
       .select("*")
       .eq("store_id", storeId)
       .eq("active", true)
       .order("sort_order", { ascending: true });
+    if (isStale()) return;
     setMenu(menuData ?? []);
 
     const { data: staffData } = await supabase
@@ -320,6 +327,7 @@ function POSPageInner() {
       .select("*")
       .eq("store_id", storeId)
       .eq("active", true);
+    if (isStale()) return;
     setStaff(staffData ?? []);
 
     const { data: tabsData } = await supabase
@@ -329,6 +337,7 @@ function POSPageInner() {
       .eq("business_date", businessDate)
       .order("created_at", { ascending: true })
       .order("created_at", { foreignTable: "tab_items", ascending: true });
+    if (isStale()) return;
     // customer_id -> customersは単一FKだが、PostgRESTの状態によっては配列で返ることがあるため防御的に正規化する
     // （lib/StoreContext.tsxのstoresネスト結果の正規化と同じパターン）
     const normalized = ((tabsData as unknown as Array<TabWithItems & { customers: CustomerBrief | CustomerBrief[] | null }>) ?? []).map(
@@ -986,26 +995,37 @@ function POSPageInner() {
     loadData();
   }
 
-  async function setDiscount(percent: number | null) {
+  // 割引は画面にすぐ反映し、品目の追加・削除と同じ書き込みキューで順番に保存する
+  // （キューを通さないと、保存中の品目が読み込み結果から一時的に消えて合計がおかしな金額になる）
+  function updateTabDiscount(patch: { discount_percent?: number | null; discount_amount?: number | null }) {
     if (!activeTab) return;
-    await supabase.from("tabs").update({ discount_percent: percent }).eq("id", activeTab.id);
-    loadData();
+    const tabId = activeTab.id;
+    const updated = tabsRef.current.map((t) => (t.id === tabId ? { ...t, ...patch } : t));
+    tabsRef.current = updated;
+    setTabs(updated);
+    enqueue(async () => {
+      await supabase.from("tabs").update(patch).eq("id", tabId);
+      loadData();
+    });
   }
 
-  async function applyManualDiscount() {
-    if (!activeTab || !manualDiscount.trim()) return;
-    await supabase
-      .from("tabs")
-      .update({ discount_amount: Number(manualDiscount) })
-      .eq("id", activeTab.id);
+  function setDiscount(percent: number | null) {
+    updateTabDiscount({ discount_percent: percent });
+  }
+
+  function applyManualDiscount() {
+    // 全角数字・カンマ・「円」を含む入力も受け付ける。数字として読めない・マイナスは適用しない
+    const normalized = manualDiscount
+      .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+      .replace(/[,，、円¥￥\s]/g, "");
+    const amount = Number(normalized);
+    if (!normalized || !Number.isFinite(amount) || amount < 0) return;
+    updateTabDiscount({ discount_amount: Math.round(amount) });
     setManualDiscount("");
-    loadData();
   }
 
-  async function clearManualDiscount() {
-    if (!activeTab) return;
-    await supabase.from("tabs").update({ discount_amount: null }).eq("id", activeTab.id);
-    loadData();
+  function clearManualDiscount() {
+    updateTabDiscount({ discount_amount: null });
   }
 
   function requestSettle(method: PaymentMethod) {
