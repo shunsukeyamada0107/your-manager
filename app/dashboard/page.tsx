@@ -1498,7 +1498,8 @@ function POSPageInner() {
       </div>
 
       {activeTab && (
-        <>
+        // apple-tab: 伝票画面だけApple風の押し心地・文字組みを試験適用（app/globals.css）
+        <div className="apple-tab space-y-4">
           <div
             style={{ borderLeftColor: tabColorFor(activeTab.id), borderLeftWidth: 5 }}
             className="rounded-xl border border-gold/50 bg-gold/25 p-4 space-y-3"
@@ -1756,9 +1757,10 @@ function POSPageInner() {
                 <span>消費税</span>
                 <span>¥{tabTax(activeTab.tab_items, taxRate).toLocaleString()}</span>
               </div>
-              <div className="flex justify-between text-gold font-bold text-lg pt-1 border-t border-dashed border-line">
+              <div className="flex justify-between items-baseline text-gold font-bold text-lg pt-1 border-t border-dashed border-line">
                 <span>合計</span>
                 <AnimatedNumber
+                  className="apple-total"
                   value={tabTotal(
                     activeTab.tab_items,
                     taxRate,
@@ -1778,7 +1780,7 @@ function POSPageInner() {
                     <button
                       key={p}
                       onClick={() => setDiscount(activeTab.discount_percent === p ? null : p)}
-                      className={`text-xs rounded-md px-3 py-1.5 font-bold border ${
+                      className={`apple-target text-xs rounded-md px-3 py-1.5 font-bold border ${
                         activeTab.discount_percent === p
                           ? "bg-rose text-white border-rose"
                           : "border-line text-gray-300"
@@ -1790,7 +1792,7 @@ function POSPageInner() {
                   {activeTab.discount_percent != null && (
                     <button
                       onClick={() => setDiscount(null)}
-                      className="text-xs rounded-md px-3 py-1.5 border border-line text-gray-400"
+                      className="apple-target text-xs rounded-md px-3 py-1.5 border border-line text-gray-400"
                     >
                       割引解除
                     </button>
@@ -1802,18 +1804,18 @@ function POSPageInner() {
                     onChange={(e) => setManualDiscount(e.target.value)}
                     placeholder="値引き額（円）"
                     inputMode="numeric"
-                    className="flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                    className="apple-target flex-1 min-w-0 rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
                   />
                   <button
                     onClick={applyManualDiscount}
-                    className="text-xs rounded-md px-3 py-1.5 font-bold border border-dashed border-rose text-rose shrink-0"
+                    className="apple-target text-xs rounded-md px-3 py-1.5 font-bold border border-dashed border-rose text-rose shrink-0"
                   >
                     値引き適用
                   </button>
                   {activeTab.discount_amount != null && (
                     <button
                       onClick={clearManualDiscount}
-                      className="text-xs rounded-md px-3 py-1.5 border border-line text-gray-400 shrink-0"
+                      className="apple-target text-xs rounded-md px-3 py-1.5 border border-line text-gray-400 shrink-0"
                     >
                       解除
                     </button>
@@ -2048,7 +2050,7 @@ function POSPageInner() {
             <SectionHeader icon={<CashSectionIcon />} tone="rose">会計</SectionHeader>
             {renderCheckoutSummary(activeTab)}
           </div>
-        </>
+        </div>
       )}
 
       {!activeTab && (
@@ -2079,12 +2081,12 @@ function POSPageInner() {
 
       {showEpaymentPicker && activeTab && (
         <div
-          className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-4"
+          className="apple-tab apple-backdrop fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-4"
           onClick={() => setShowEpaymentPicker(false)}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm rounded-xl border border-line bg-elevated p-4 space-y-2.5"
+            className="apple-sheet w-full max-w-sm rounded-xl border border-line bg-elevated p-4 space-y-2.5"
           >
             <div className="text-gold font-bold text-base mb-1">電子決済の種類を選択</div>
             {enabledEpaymentMethods.map((m) => (
@@ -2140,12 +2142,12 @@ function POSPageInner() {
           const wasClosed = !!tab.closed_at;
           return (
             <div
-              className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4"
+              className="apple-tab apple-backdrop fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4"
               onClick={() => setSplitTabId(null)}
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-sm rounded-xl border border-line bg-elevated p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+                className="apple-sheet w-full max-w-sm rounded-xl border border-line bg-elevated p-5 space-y-4 max-h-[90vh] overflow-y-auto"
               >
                 <div>
                   <div className="text-gold font-bold text-base">
@@ -2274,12 +2276,12 @@ function POSPageInner() {
 
       {pendingSettleMethod && activeTab && (
         <div
-          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          className="apple-tab apple-backdrop fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
           onClick={() => setPendingSettleMethod(null)}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm rounded-xl border border-line bg-elevated p-5 space-y-4 text-center animate-card-pop-in"
+            className="apple-sheet w-full max-w-sm rounded-xl border border-line bg-elevated p-5 space-y-4 text-center"
           >
             <div className="text-[15px] text-gray-200">
               {PAYMENT_METHOD_LABELS[pendingSettleMethod]}で
@@ -2315,12 +2317,12 @@ function POSPageInner() {
 
       {showReceipt && activeTab && (
         <div
-          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          className="apple-tab apple-backdrop fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
           onClick={() => setShowReceipt(false)}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm rounded-xl border border-line bg-elevated p-5 space-y-4 max-h-[85vh] overflow-y-auto animate-card-pop-in"
+            className="apple-sheet w-full max-w-sm rounded-xl border border-line bg-elevated p-5 space-y-4 max-h-[85vh] overflow-y-auto"
           >
             <div className="text-center space-y-1">
               <div className="animate-check-pop mx-auto w-12 h-12 rounded-full bg-gold flex items-center justify-center text-bg text-2xl font-bold">
@@ -2434,12 +2436,14 @@ function POSPageInner() {
 
       {showCreateModal && (
         <div
-          className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-4 overflow-y-auto"
           onClick={() => setShowCreateModal(false)}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm rounded-xl border border-line bg-elevated p-4 space-y-4 max-h-[85vh] overflow-y-auto"
+            // スマホ（iPhoneのSafari）では vh がツールバーやキーボードを除いた見える高さより大きくなり、下の「作成する」に届かなかった。
+            // 見える高さ（dvh）に収め、ボタンの行は下に固定する
+            className="w-full max-w-sm rounded-xl border border-line bg-elevated p-4 space-y-4 max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain"
           >
             <div className="text-gold font-bold text-base">伝票を作る</div>
 
@@ -2454,7 +2458,7 @@ function POSPageInner() {
                     setSelectedCustomer(null);
                   }}
                   placeholder="名前・フリガナ・メモ・ボトルで検索"
-                  className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                  className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-base"
                 />
 
                 {selectedCustomer && (
@@ -2507,31 +2511,31 @@ function POSPageInner() {
                       value={newCustomerDraft.name}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, name: e.target.value }))}
                       placeholder="お名前"
-                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-base"
                     />
                     <input
                       value={newCustomerDraft.nameKana}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, nameKana: e.target.value }))}
                       placeholder="フリガナ(任意)"
-                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-base"
                     />
                     <input
                       value={newCustomerDraft.phone}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, phone: e.target.value }))}
                       placeholder="電話番号(任意)"
-                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-base"
                     />
                     <input
                       type="date"
                       value={newCustomerDraft.birthday}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, birthday: e.target.value }))}
-                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-base"
                     />
                     {staff.length > 0 && (
                       <select
                         value={newCustomerDraft.primaryStaffId}
                         onChange={(e) => setNewCustomerDraft((d) => ({ ...d, primaryStaffId: e.target.value }))}
-                        className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                        className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-base"
                       >
                         <option value="">担当キャスト未設定</option>
                         {staff.map((s) => (
@@ -2545,14 +2549,14 @@ function POSPageInner() {
                       value={newCustomerDraft.bottleKeep}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, bottleKeep: e.target.value }))}
                       placeholder="ボトルキープ(任意)"
-                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-base"
                     />
                     <textarea
                       value={newCustomerDraft.memo}
                       onChange={(e) => setNewCustomerDraft((d) => ({ ...d, memo: e.target.value }))}
                       placeholder="メモ(任意)"
                       rows={2}
-                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-sm"
+                      className="w-full rounded-md bg-bg2 border border-line px-2 py-1.5 text-base"
                     />
                     <div className="flex gap-2">
                       <button
@@ -2582,7 +2586,7 @@ function POSPageInner() {
                 value={modalName}
                 onChange={(e) => setModalName(e.target.value)}
                 placeholder="例：田中様・3卓"
-                className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                className="w-full rounded-md bg-bg2 border border-line px-3 py-2 text-base"
               />
 
               {nameInputMode === "kana_keypad" && (
@@ -2691,7 +2695,7 @@ function POSPageInner() {
                 onChange={(e) => setModalGuestCount(e.target.value)}
                 inputMode="numeric"
                 placeholder="例：4"
-                className="w-24 rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                className="w-24 rounded-md bg-bg2 border border-line px-3 py-2 text-base"
               />
             </div>
 
@@ -2703,7 +2707,7 @@ function POSPageInner() {
                   onChange={(e) => setModalGuestMale(e.target.value)}
                   inputMode="numeric"
                   placeholder="男性"
-                  className="w-20 rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                  className="w-20 rounded-md bg-bg2 border border-line px-3 py-2 text-base"
                 />
                 <span className="text-xs text-gray-500">名 ／</span>
                 <input
@@ -2711,7 +2715,7 @@ function POSPageInner() {
                   onChange={(e) => setModalGuestFemale(e.target.value)}
                   inputMode="numeric"
                   placeholder="女性"
-                  className="w-20 rounded-md bg-bg2 border border-line px-3 py-2 text-sm"
+                  className="w-20 rounded-md bg-bg2 border border-line px-3 py-2 text-base"
                 />
                 <span className="text-xs text-gray-500">名</span>
               </div>
@@ -2738,7 +2742,7 @@ function POSPageInner() {
               </div>
             )}
 
-            <div className="flex gap-2 pt-1">
+            <div className="sticky -bottom-4 -mx-4 -mb-4 px-4 pt-3 pb-4 bg-elevated border-t border-line flex gap-2">
               <button
                 onClick={() => setShowCreateModal(false)}
                 className="flex-1 rounded-md border border-line py-2.5 text-sm text-gray-300"
